@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Staple",
+  "version": "1.0",
+  "description": "AI that walks you through any UI",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["content.js"],
+    "css": ["content.css"],
+    "run_at": "document_idle"
+  }],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html" }
+}
