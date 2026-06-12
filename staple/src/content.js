@@ -1,6 +1,8 @@
 const api = typeof browser !== 'undefined' ? browser : chrome;
+const safeSession = api.storage.session || api.storage.local;
 
 let elementMap = [];
+let midFlowSendGuard = false;
 
 function scrapeElements() {
   const selectors = [
@@ -61,6 +63,9 @@ function startObserver() {
         api.storage.local.get(['activeSteps', 'activeStepIndex'], resolve);
       });
       if (stored.activeSteps && stored.activeSteps.length > 0) {
+        if (midFlowSendGuard) { console.log('[Staple Step] midFlowSendGuard active, skipping duplicate PAGE_CHANGED_MID_FLOW'); return; }
+        midFlowSendGuard = true;
+        setTimeout(() => { midFlowSendGuard = false; }, 15000);
         console.log('[Staple Step] active task mid-flow on URL change, sending PAGE_CHANGED_MID_FLOW');
         const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
         runtime.sendMessage({
@@ -99,12 +104,13 @@ function injectCharacter() {
 
   const buddy = document.createElement('div');
   buddy.id = 'st-buddy';
-  buddy.innerHTML = `
-    <div id="st-body">
-      <div id="st-eye-left"></div>
-      <div id="st-eye-right"></div>
-    </div>
-  `;
+
+  const cat = document.createElement('div');
+  cat.id = 'st-cat';
+  cat.className = 'state-idle';
+  cat.style.backgroundImage = `url('${api.runtime.getURL('cat_sprite.png')}')`;
+  buddy.appendChild(cat);
+
   buddy.addEventListener('click', handleBuddyClick);
   document.body.appendChild(buddy);
 
@@ -120,69 +126,122 @@ function injectCharacter() {
       }
     }
   });
+
+  startIdleCleanTimer();
+}
+
+let idleCleanTimer = null;
+
+function startIdleCleanTimer() {
+  if (idleCleanTimer) clearTimeout(idleCleanTimer);
+  scheduleCleanAnimation();
+}
+
+function scheduleCleanAnimation() {
+  const delay = 15000 + Math.random() * 15000;
+  idleCleanTimer = setTimeout(() => {
+    const cat = document.getElementById('st-cat');
+    if (cat && cat.className === 'state-idle') {
+      setCharacterState('clean');
+      cat.addEventListener('animationend', function onCleanEnd() {
+        cat.removeEventListener('animationend', onCleanEnd);
+        if (cat.className === 'state-clean') {
+          setCharacterState('idle');
+        }
+      }, { once: true });
+    }
+    scheduleCleanAnimation();
+  }, delay);
 }
 
 let currentHighlight = null;
-let watchTarget = null;
 
-function removeHoverZone() {
-  const existing = document.getElementById('sb-hover-zone');
-  if (existing) existing.remove();
-}
-
-function createHoverZone(el, onEnter) {
-  removeHoverZone();
-  const rect = el.getBoundingClientRect();
-  const pad = 40;
-  const zone = document.createElement('div');
-  zone.id = 'sb-hover-zone';
-  zone.style.cssText = `
-    position: fixed;
-    left: ${rect.left - pad}px;
-    top: ${rect.top - pad}px;
-    width: ${rect.width + pad * 2}px;
-    height: ${rect.height + pad * 2}px;
-    z-index: 2147483646;
-    pointer-events: all;
-    background: transparent;
-  `;
-  zone.addEventListener('mouseenter', onEnter);
-  document.body.appendChild(zone);
-  console.log('[Staple Step] hover zone created at', rect.left - pad, rect.top - pad, 'size', rect.width + pad * 2, 'x', rect.height + pad * 2);
-  return zone;
-}
+let walkTransitionEndHandler = null;
 
 function moveCharacter(x, y) {
   const buddy = document.getElementById('st-buddy');
   const bubble = document.getElementById('st-bubble');
+  const cat = document.getElementById('st-cat');
 
   console.log('[Staple Step] moveCharacter to (', x, ',', y, ')');
 
-  setCharacterState('walking');
+  const buddyRect = buddy.getBoundingClientRect();
+  const currentLeft = buddyRect.left;
+  const currentTop = buddyRect.top;
+  const currentCenterX = currentLeft + 40;
+  const currentCenterY = currentTop + 40;
 
-  buddy.style.position = 'fixed';
-  buddy.style.left = `${x - 22}px`;
-  buddy.style.top = `${y - 70}px`;
+  // Cancel any in-progress walk: pin at current computed position
+  buddy.style.transition = 'none';
+  buddy.style.left = `${currentLeft}px`;
+  buddy.style.top = `${currentTop}px`;
   buddy.style.bottom = 'auto';
   buddy.style.right = 'auto';
+  void buddy.offsetHeight;
+
+  // Set direction before transition starts
+  if (x < currentCenterX) {
+    cat.style.transform = 'scaleX(-1)';
+  } else if (x > currentCenterX) {
+    cat.style.transform = 'scaleX(1)';
+  }
+
+  setCharacterState('walking');
+
+  // Calculate target position, distance, and transition duration
+  const targetLeft = Math.max(5, Math.min(x - 40, window.innerWidth - 85));
+  const targetTop = Math.max(5, Math.min(y - 90, window.innerHeight - 85));
+  const targetCenterX = targetLeft + 40;
+  const targetCenterY = targetTop + 40;
+  const dx = targetCenterX - currentCenterX;
+  const dy = targetCenterY - currentCenterY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const duration = Math.max(0.15, Math.min(distance / 300, 3.0));
+
+  // Remove previous transitionend listener
+  if (walkTransitionEndHandler) {
+    buddy.removeEventListener('transitionend', walkTransitionEndHandler);
+    walkTransitionEndHandler = null;
+  }
+
+  const walkDone = new Promise(resolve => {
+    function onWalkEnd(e) {
+      if (e.propertyName !== 'left' && e.propertyName !== 'top') return;
+      buddy.removeEventListener('transitionend', onWalkEnd);
+      if (walkTransitionEndHandler === onWalkEnd) walkTransitionEndHandler = null;
+      setCharacterState('paw');
+      setTimeout(resolve, 1000);
+    }
+
+    if (distance < 1) {
+      setCharacterState('paw');
+      setTimeout(resolve, 1000);
+    } else {
+      walkTransitionEndHandler = onWalkEnd;
+      buddy.addEventListener('transitionend', onWalkEnd);
+    }
+  });
+
+  buddy.style.position = 'fixed';
+  buddy.style.transition = `left ${duration}s linear, top ${duration}s linear`;
+  buddy.style.left = `${targetLeft}px`;
+  buddy.style.top = `${targetTop}px`;
 
   bubble.style.left = `${Math.min(x, window.innerWidth - 280)}px`;
-  bubble.style.top = `${y - 140}px`;
+  bubble.style.top = `${Math.max(5, y - 140)}px`;
   bubble.style.bottom = 'auto';
-
-  setTimeout(() => setCharacterState('idle'), 700);
 
   if (currentHighlight) currentHighlight.classList.remove('st-highlight');
 
-  // Scroll to approximate location first, then find element after scroll settles
   let target = document.elementFromPoint(x, y);
   console.log('[Staple Step] moveCharacter elementFromPoint returned:', target?.tagName, target?.className || target?.id || '');
   if (target && target.id !== 'st-buddy' && target.id !== 'st-bubble') {
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     target.classList.add('st-highlight');
     currentHighlight = target;
-    watchTarget = target;
   }
+
+  return walkDone;
 }
 
 function showBubble(text) {
@@ -191,21 +250,94 @@ function showBubble(text) {
   bubble.innerText = text;
 }
 
-let inlineSteps = [];
-let inlineStepIndex = 0;
-let inlineAdvanceResolve = null;
+async function walkHome() {
+  const buddy = document.getElementById('st-buddy');
+  const cat = document.getElementById('st-cat');
+  if (!buddy) return;
 
-function inlineWaitForAdvance() {
+  const targetLeft = window.innerWidth - 100;
+  const targetTop = window.innerHeight - 160;
+  const targetCenterX = targetLeft + 40;
+
+  const buddyRect = buddy.getBoundingClientRect();
+  const currentLeft = buddyRect.left;
+  const currentTop = buddyRect.top;
+  const currentCenterX = currentLeft + 40;
+  const currentCenterY = currentTop + 40;
+
+  const dx = targetCenterX - currentCenterX;
+  const dy = targetTop + 40 - currentCenterY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const duration = Math.max(0.15, Math.min(distance / 300, 3.0));
+
+  if (cat) cat.style.transform = 'scaleX(1)';
+
+  setCharacterState('walking');
+
+  buddy.style.transition = 'none';
+  buddy.style.left = `${currentLeft}px`;
+  buddy.style.top = `${currentTop}px`;
+  buddy.style.bottom = 'auto';
+  buddy.style.right = 'auto';
+  void buddy.offsetHeight;
+
+  if (walkTransitionEndHandler) {
+    buddy.removeEventListener('transitionend', walkTransitionEndHandler);
+    walkTransitionEndHandler = null;
+  }
+
   return new Promise(resolve => {
-    inlineAdvanceResolve = resolve;
+    function onHomeEnd(e) {
+      if (e.propertyName !== 'left' && e.propertyName !== 'top') return;
+      buddy.removeEventListener('transitionend', onHomeEnd);
+      if (walkTransitionEndHandler === onHomeEnd) walkTransitionEndHandler = null;
+      setCharacterState('sleep');
+      resolve();
+    }
+
+    if (distance < 1) {
+      setCharacterState('sleep');
+      resolve();
+    } else {
+      walkTransitionEndHandler = onHomeEnd;
+      buddy.addEventListener('transitionend', onHomeEnd);
+    }
+
+    buddy.style.transition = `left ${duration}s linear, top ${duration}s linear`;
+    buddy.style.left = `${targetLeft}px`;
+    buddy.style.top = `${targetTop}px`;
   });
 }
 
-function handleBuddyClick(e) {
+let inlineSteps = [];
+let inlineStepIndex = 0;
+let inlineAdvanceResolve = null;
+let inlineTimeout = null;
+
+function inlineWaitForAdvance() {
+  return new Promise(resolve => {
+    let resolved = false;
+    function advance() {
+      if (resolved) return;
+      resolved = true;
+      if (inlineTimeout) { clearTimeout(inlineTimeout); inlineTimeout = null; }
+      inlineAdvanceResolve = null;
+      resolve();
+    }
+    inlineAdvanceResolve = advance;
+    inlineTimeout = setTimeout(advance, 8000);
+  });
+}
+
+async function handleBuddyClick(e) {
   e.stopPropagation();
   if (inlineAdvanceResolve) {
     inlineAdvanceResolve();
-    inlineAdvanceResolve = null;
+    return;
+  }
+  const data = await new Promise(r => safeSession.get(['staple_walk_active'], r));
+  if (data && data.staple_walk_active) {
+    safeSession.set({ staple_advance_click: Date.now() });
     return;
   }
   const box = document.getElementById('st-inline-box');
@@ -250,17 +382,41 @@ function showInlineBox() {
 
   const buddy = document.getElementById('st-buddy');
   const buddyRect = buddy.getBoundingClientRect();
-  const isRightHalf = buddyRect.left > window.innerWidth / 2;
+  const buddyCenterX = buddyRect.left + 40;
+  const isRightHalf = buddyCenterX > window.innerWidth / 2;
 
   box.style.top = '';
+  box.style.bottom = '';
   box.style.left = '';
   box.style.right = '';
-  box.style.bottom = '80px';
 
   if (isRightHalf) {
-    box.style.left = '20px';
+    box.style.right = `${window.innerWidth - buddyRect.right}px`;
   } else {
-    box.style.right = '20px';
+    box.style.left = `${buddyRect.left}px`;
+  }
+
+  const spaceAbove = buddyRect.top;
+  if (spaceAbove >= 100) {
+    box.style.bottom = `${window.innerHeight - buddyRect.top + 10}px`;
+  } else {
+    box.style.top = `${buddyRect.bottom + 10}px`;
+  }
+
+  const boxWidth = 260;
+  const clampMargin = 5;
+  if (isRightHalf) {
+    const rightPx = parseInt(box.style.right) || 0;
+    if (rightPx < clampMargin) box.style.right = `${clampMargin}px`;
+    if (window.innerWidth - rightPx - boxWidth < 0) {
+      box.style.right = `${window.innerWidth - boxWidth - clampMargin}px`;
+    }
+  } else {
+    const leftPx = parseInt(box.style.left) || 0;
+    if (leftPx < clampMargin) box.style.left = `${clampMargin}px`;
+    if (leftPx + boxWidth > window.innerWidth - clampMargin) {
+      box.style.left = `${window.innerWidth - boxWidth - clampMargin}px`;
+    }
   }
 
   box.style.display = 'flex';
@@ -297,7 +453,9 @@ async function handleInlineSubmit() {
   runtime.sendMessage({
     type: 'INLINE_QUERY',
     question,
-    elementMap
+    elementMap,
+    url: window.location.href,
+    title: document.title
   }, async response => {
     if (!response || !response.success) {
       showBubble(response?.error || 'Something went wrong.');
@@ -314,7 +472,22 @@ async function handleInlineSubmit() {
     if (result.steps && result.steps.length > 0) {
       await executeInlineSteps(result.steps);
     } else {
-      showBubble(result.summary || "Here's what I found.");
+      const catMessages = [
+        'Meow... I looked everywhere but could not find that. Mrrp.',
+        'Mrrrow, this page is a mystery to me. Purr...',
+        'Nyaa~ I searched high and low, but nothing matched. Meow.',
+        'Mew... your request is too elusive for this kitty. Mrrow.'
+      ];
+      const buddy = document.getElementById('st-buddy');
+      if (buddy) {
+        const r = buddy.getBoundingClientRect();
+        const bx = Math.min(r.left + 40, window.innerWidth - 280);
+        const by = Math.max(5, r.top - 10);
+        const bubble = document.getElementById('st-bubble');
+        bubble.style.left = `${bx}px`;
+        bubble.style.top = `${by}px`;
+      }
+      showBubble(catMessages[Math.floor(Math.random() * catMessages.length)]);
       setCharacterState('idle');
     }
   });
@@ -332,17 +505,19 @@ async function executeInlineSteps(steps) {
 
     if (step.elementId !== null && step.elementId !== undefined) {
       const target = elementMap.find(e => e.id === step.elementId);
+      let walkPromise = null;
       if (target) {
-        moveCharacter(target.x, target.y);
+        walkPromise = moveCharacter(target.x, target.y);
       }
       const label = steps.length > 1
         ? `(${i + 1}/${steps.length}) ${step.instruction}`
         : step.instruction;
       showBubble(label);
-      setCharacterState('idle');
 
       if (i < steps.length - 1) {
         await inlineWaitForAdvance();
+      } else if (walkPromise) {
+        await walkPromise;
       }
     } else {
       showBubble(step.instruction);
@@ -350,6 +525,7 @@ async function executeInlineSteps(steps) {
   }
 
   showBubble('✅ All done!');
+  await walkHome();
   setTimeout(() => {
     const bubble = document.getElementById('st-bubble');
     bubble.style.display = 'none';
@@ -360,23 +536,59 @@ async function executeInlineSteps(steps) {
   api.storage.local.remove(['activeSteps', 'activeStepIndex', 'elementMap']);
 }
 
+let idleSleepTimer = null;
+
 function setCharacterState(state) {
-  const body = document.getElementById('st-body');
-  if (!body) return;
-  body.className = '';
-  if (state === 'walking') body.classList.add('is-walking');
-  if (state === 'thinking') body.classList.add('is-thinking');
+  const cat = document.getElementById('st-cat');
+  if (!cat) return;
+  const stateMap = {
+    idle: 'state-idle',
+    walking: 'state-walking',
+    thinking: 'state-thinking',
+    paw: 'state-paw',
+    sleep: 'state-sleep',
+    clean: 'state-clean'
+  };
+  cat.className = stateMap[state] || 'state-idle';
+
+  if (idleSleepTimer) { clearTimeout(idleSleepTimer); idleSleepTimer = null; }
+
+  if (state === 'idle') {
+    idleSleepTimer = setTimeout(() => {
+      if (cat.className === 'state-idle') {
+        if (idleCleanTimer) { clearTimeout(idleCleanTimer); idleCleanTimer = null; }
+        cat.className = 'state-sleep';
+      }
+    }, 5000);
+  }
+
+  if (state === 'paw') {
+    cat.addEventListener('animationend', function onPawEnd() {
+      cat.removeEventListener('animationend', onPawEnd);
+      if (cat.className === 'state-paw') {
+        setCharacterState('idle');
+      }
+    }, { once: true });
+  }
 }
 
 function resetCharacter() {
   const buddy = document.getElementById('st-buddy');
   const bubble = document.getElementById('st-bubble');
+  const cat = document.getElementById('st-cat');
   if (!buddy) return;
 
+  if (walkTransitionEndHandler) {
+    buddy.removeEventListener('transitionend', walkTransitionEndHandler);
+    walkTransitionEndHandler = null;
+  }
+  buddy.style.transition = '';
   buddy.style.left = '';
   buddy.style.top = '';
   buddy.style.bottom = '80px';
   buddy.style.right = '20px';
+
+  if (cat) cat.style.transform = 'scaleX(1)';
 
   if (bubble) {
     bubble.style.display = 'none';
@@ -388,106 +600,16 @@ function resetCharacter() {
     currentHighlight.classList.remove('st-highlight');
     currentHighlight = null;
   }
-  watchTarget = null;
-  removeHoverZone();
 
   setCharacterState('idle');
-}
-
-const STORAGE_KEY = 'staple_interaction';
-
-async function handleWatchElement(msg) {
-  console.log('[Staple Step] WATCH_ELEMENT received - elementId:', msg.elementId, 'delay:', msg.delay);
-
-  // Prefer the direct DOM reference stored during moveCharacter (avoids stale coordinate lookups)
-  let el = watchTarget;
-  console.log('[Staple Step] WATCH_ELEMENT - watchTarget:', el?.tagName, el?.className || el?.id || '(none)');
-
-  // Fallback: find by label scan if watchTarget is missing or stale
-  if (!el || !document.body.contains(el)) {
-    console.log('[Staple Step] WATCH_ELEMENT - watchTarget missing/stale, falling back to label scan');
-    const mapTarget = elementMap.find(e => e.id === msg.elementId) ||
-      (() => { elementMap = scrapeElements(); return elementMap.find(e => e.id === msg.elementId); })();
-
-    if (mapTarget) {
-      const allEls = document.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="switch"], nav *, header *');
-      for (const candidate of allEls) {
-        const rect = candidate.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          const label = (
-            candidate.innerText?.trim() ||
-            candidate.getAttribute('aria-label') ||
-            candidate.getAttribute('placeholder') ||
-            candidate.getAttribute('title') ||
-            candidate.getAttribute('alt') ||
-            candidate.tagName
-          );
-          if (label && label.slice(0, 80) === mapTarget.label) {
-            el = candidate;
-            console.log('[Staple Step] WATCH_ELEMENT - found by label match:', el.tagName, label.slice(0, 40));
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  if (!el) {
-    console.log('[Staple Step] WATCH_ELEMENT - element not found, aborting');
-    return;
-  }
-
-  // Scroll into view and wait for layout to settle
-  el.scrollIntoView({ behavior: 'instant', block: 'center' });
-  await new Promise(r => setTimeout(r, 200));
-
-  const rect = el.getBoundingClientRect();
-  console.log('[Staple Step] WATCH_ELEMENT - element rect after scroll:', Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), 'x', Math.round(rect.height));
-
-  let triggered = false;
-
-  function trigger(event) {
-    if (triggered) return;
-    triggered = true;
-    console.log('[Staple Step] WATCH_ELEMENT - trigger FIRED! event:', event.type, 'elementId:', msg.elementId);
-    removeHoverZone();
-
-    const delay = msg.delay || 2000;
-    console.log('[Staple Step] WATCH_ELEMENT - waiting', delay, 'ms before signalling interaction');
-    setTimeout(() => {
-      const payload = { elementId: msg.elementId, timestamp: Date.now() };
-      console.log('[Staple Step] WATCH_ELEMENT - writing to storage.session:', payload);
-      api.storage.session.set({ [STORAGE_KEY]: payload }, () => {
-        if (api.runtime.lastError) {
-          console.log('[Staple Step] WATCH_ELEMENT - storage.session error:', api.runtime.lastError.message);
-        } else {
-          console.log('[Staple Step] WATCH_ELEMENT - storage.session write successful');
-        }
-      });
-    }, delay);
-  }
-
-  // Attach listeners to the element and up to 3 ancestor levels to catch bubbled events
-  const listenTargets = [el];
-  let p = el.parentElement;
-  for (let i = 0; i < 3 && p; i++, p = p.parentElement) {
-    listenTargets.push(p);
-  }
-  listenTargets.forEach(t => {
-    t.addEventListener('mouseenter', trigger);
-    t.addEventListener('click', trigger);
-  });
-  console.log('[Staple Step] WATCH_ELEMENT - listeners attached to', listenTargets.length, 'targets (element + ancestors)');
-
-  // Create a hover zone with 40px padding around the element for easier hover detection
-  createHoverZone(el, trigger);
+  startIdleCleanTimer();
 }
 
 const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
 runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_ELEMENTS') {
     elementMap = scrapeElements();
-    sendResponse(elementMap);
+    sendResponse({ elementMap, url: window.location.href, title: document.title });
   }
   if (msg.type === 'MOVE_CHARACTER') {
     const target = elementMap.find(e => e.id === msg.elementId);
@@ -502,8 +624,9 @@ runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'RESET_CHARACTER') {
     resetCharacter();
   }
-  if (msg.type === 'WATCH_ELEMENT') {
-    handleWatchElement(msg);
+  if (msg.type === 'WALK_HOME') {
+    walkHome().then(() => sendResponse(true));
+    return true;
   }
   return true;
 });
@@ -527,6 +650,10 @@ async function checkMidFlowResume() {
 
   if (!data.activeSteps || !data.activeSteps.length) return;
   if (data.activeStepIndex >= data.activeSteps.length) return;
+
+  if (midFlowSendGuard) { console.log('[Staple Step] checkMidFlowResume - guard active, skipping'); return; }
+  midFlowSendGuard = true;
+  setTimeout(() => { midFlowSendGuard = false; }, 15000);
 
   await new Promise(r => setTimeout(r, 1500));
 
@@ -565,3 +692,20 @@ async function checkMidFlowResume() {
 }
 
 checkMidFlowResume();
+
+window.addEventListener('resize', () => {
+  const buddy = document.getElementById('st-buddy');
+  if (!buddy || !buddy.style.left || !buddy.style.top) return;
+  const buddyLeft = parseInt(buddy.style.left);
+  const buddyTop = parseInt(buddy.style.top);
+  if (isNaN(buddyLeft) || isNaN(buddyTop)) return;
+  buddy.style.left = `${Math.max(5, Math.min(buddyLeft, window.innerWidth - 85))}px`;
+  buddy.style.top = `${Math.max(5, Math.min(buddyTop, window.innerHeight - 85))}px`;
+  const bubble = document.getElementById('st-bubble');
+  if (bubble && bubble.style.top) {
+    const bubbleTop = parseInt(bubble.style.top);
+    if (!isNaN(bubbleTop)) {
+      bubble.style.top = `${Math.max(5, bubbleTop)}px`;
+    }
+  }
+});

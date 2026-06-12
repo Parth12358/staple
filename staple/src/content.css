@@ -1,7 +1,7 @@
 #st-buddy {
   position: fixed;
-  width: 44px;
-  height: 44px;
+  width: 80px;
+  height: 80px;
   bottom: 80px;
   right: 20px;
   z-index: 2147483647;
@@ -11,45 +11,73 @@
               top 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-#st-body {
-  width: 44px;
-  height: 44px;
-  background: #6366f1;
-  border-radius: 50%;
-  position: relative;
-  animation: st-idle 2s ease-in-out infinite;
-  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.5);
+#st-cat {
+  width: 80px;
+  height: 80px;
+  background-size: 640px 800px;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
 }
 
-#st-eye-left,
-#st-eye-right {
-  width: 8px;
-  height: 8px;
-  background: white;
-  border-radius: 50%;
-  position: absolute;
-  top: 14px;
-}
-#st-eye-left { left: 10px; }
-#st-eye-right { right: 10px; }
-
-@keyframes st-idle {
-  0%, 100% { transform: translateY(0px) scaleX(1); }
-  50% { transform: translateY(-5px) scaleX(1.05); }
+#st-cat.state-idle {
+  background-position-y: 0px;
+  animation: spr-idle 0.6s steps(4) infinite;
 }
 
-@keyframes st-walking {
-  0%, 100% { transform: scaleX(1.15) scaleY(0.88); }
-  50% { transform: scaleX(0.88) scaleY(1.15); }
+#st-cat.state-walking {
+  background-position-y: -320px;
+  animation: spr-walk 0.7s steps(8) infinite;
 }
 
-@keyframes st-thinking {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+#st-cat.state-thinking {
+  background-position-y: -720px;
+  animation: spr-scared 0.6s steps(4) infinite;
 }
 
-#st-body.is-walking { animation: st-walking 0.25s ease-in-out infinite; }
-#st-body.is-thinking { animation: st-thinking 0.7s linear infinite; }
+#st-cat.state-paw {
+  background-position-y: -560px;
+  animation: spr-paw 0.8s steps(6) 1 forwards;
+}
+
+#st-cat.state-sleep {
+  background-position-y: -480px;
+  animation: spr-sleep 1.2s steps(4) infinite;
+}
+
+#st-cat.state-clean {
+  background-position-y: -160px;
+  animation: spr-clean 0.6s steps(4) 1 forwards;
+}
+
+@keyframes spr-idle {
+  0% { background-position-x: 0px; }
+  100% { background-position-x: -320px; }
+}
+
+@keyframes spr-walk {
+  0% { background-position-x: 0px; }
+  100% { background-position-x: -640px; }
+}
+
+@keyframes spr-scared {
+  0% { background-position-x: 0px; }
+  100% { background-position-x: -320px; }
+}
+
+@keyframes spr-paw {
+  0% { background-position-x: 0px; }
+  100% { background-position-x: -480px; }
+}
+
+@keyframes spr-sleep {
+  0% { background-position-x: 0px; }
+  100% { background-position-x: -320px; }
+}
+
+@keyframes spr-clean {
+  0% { background-position-x: 0px; }
+  100% { background-position-x: -320px; }
+}
 
 #st-bubble {
   position: fixed;

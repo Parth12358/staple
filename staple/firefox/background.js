@@ -24,10 +24,14 @@ function loadKeys() {
   });
 }
 
-function buildInlineMessages(question, elementMap, history) {
+function buildInlineMessages(question, elementMap, history, url, title) {
   const mapString = elementMap
     .map(e => `[${e.id}] ${e.label} (${e.tag}) at (${e.x}, ${e.y})`)
     .join('\n');
+
+  const siteContext = url || title
+    ? `Site context:\n  URL: ${url || 'unknown'}\n  Title: ${title || 'unknown'}\n`
+    : '';
 
   const systemPrompt = `You are Staple, an AI navigation assistant embedded in a browser extension.
 You help users navigate UI on any webpage by reading a map of interactive elements.
@@ -43,13 +47,13 @@ Always respond in valid JSON only, no markdown:
 If only one step is needed, still return a steps array with one item.`;
 
   return [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: systemPrompt + '\n' + siteContext },
     ...history,
     { role: 'user', content: `Page elements:\n${mapString}\n\nUser question: ${question}` }
   ];
 }
 
-async function handleInlineQuery(question, elementMap) {
+async function handleInlineQuery(question, elementMap, url, title) {
   try {
     const keys = await loadKeys();
     if (!keys.deepseekKey) {
@@ -57,15 +61,16 @@ async function handleInlineQuery(question, elementMap) {
     }
 
     const history = await loadHistory();
-    const messages = buildInlineMessages(question, elementMap, history);
+    const messages = buildInlineMessages(question, elementMap, history, url, title);
     const result = await handleDeepSeekQuery(messages, keys.deepseekKey);
 
     if (!result.success) return result;
 
+    const assistantText = result.result.summary || (result.result.steps && result.result.steps.map(s => s.instruction).join('. ')) || 'Done.';
     const updatedHistory = [
       ...history,
       { role: 'user', content: question },
-      { role: 'assistant', content: JSON.stringify(result.result) }
+      { role: 'assistant', content: assistantText }
     ];
     await saveHistory(updatedHistory);
 
@@ -79,8 +84,16 @@ async function handleInlineQuery(question, elementMap) {
   }
 }
 
+let midFlowProcessing = false;
+
 async function handlePageChangedMidFlow(elementMap, url, activeSteps, activeStepIndex) {
   try {
+    if (midFlowProcessing) {
+      console.log(`${LOG_PREFIX} midFlowProcessing guard active, skipping duplicate PAGE_CHANGED_MID_FLOW`);
+      return { success: false, error: 'Already processing a mid-flow re-evaluation.' };
+    }
+    midFlowProcessing = true;
+
     const keys = await loadKeys();
     if (!keys.deepseekKey) {
       return { success: false, error: 'No DeepSeek API key configured.' };
@@ -135,9 +148,10 @@ If the task is already complete based on the current page state, return an empty
       elementMap
     });
 
+    const midFlowAssistantText = result.result.summary || (result.result.steps && result.result.steps.map(s => s.instruction).join('. ')) || 'Page re-evaluated.';
     const updatedHistory = [
       ...history,
-      { role: 'assistant', content: JSON.stringify(result.result) }
+      { role: 'assistant', content: midFlowAssistantText }
     ];
     await saveHistory(updatedHistory);
 
@@ -153,8 +167,10 @@ If the task is already complete based on the current page state, return an empty
       summary: result.result.summary
     });
 
+    midFlowProcessing = false;
     return result;
   } catch (err) {
+    midFlowProcessing = false;
     console.error(`${LOG_PREFIX} Page changed re-evaluation failed:`, err);
     return { success: false, error: err.message || 'Re-evaluation failed.' };
   }
@@ -166,7 +182,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'INLINE_QUERY') {
-    handleInlineQuery(msg.question, msg.elementMap).then(sendResponse);
+    handleInlineQuery(msg.question, msg.elementMap, msg.url, msg.title).then(sendResponse);
     return true;
   }
   if (msg.type === 'PAGE_CHANGED_MID_FLOW') {
@@ -195,7 +211,7 @@ async function handleDeepSeekQuery(messages, deepseekKey) {
         model: 'deepseek-chat',
         messages,
         response_format: { type: 'json_object' },
-        max_tokens: 300
+        max_tokens: 800
       })
     });
 

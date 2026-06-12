@@ -13,5 +13,9 @@
     "run_at": "document_idle"
   }],
   "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_icon": "icon.svg" }
+  "action": { "default_popup": "popup.html", "default_icon": "icon.svg" },
+  "web_accessible_resources": [{
+    "resources": ["cat_sprite.png"],
+    "matches": ["<all_urls>"]
+  }]
 }

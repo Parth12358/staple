@@ -6,4 +6,6 @@ for f in $FILES; do
 done
 cp icons/icon.svg chrome/icon.svg
 cp icons/icon.svg firefox/icon.svg
+cp icons/cat_sprite.png chrome/cat_sprite.png
+cp icons/cat_sprite.png firefox/cat_sprite.png
 echo "Built for Chrome and Firefox"

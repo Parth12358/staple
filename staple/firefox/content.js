@@ -1,37 +1,8 @@
-// Fixes applied to this file:
-// Fix 1: safeSession shim for Firefox (storage.session unavailable)
-// Fix 2: MOVE_CHARACTER/SHOW_BUBBLE/SET_STATE handlers call sendResponse({ done: true })
-// Fix 3: watchTarget removed from moveCharacter; handleWatchElement does definitive element lookup post-scroll
-// Fix 4: silent abort replaced with failure signal written to safeSession
-// Fix 5: static hover zone div replaced with proximity mousemove listener
-// Fix 7: MutationObserver disconnected around Staple DOM insertions; Staple elements filtered from scrapeElements
-// Fix 8: checkMidFlowResume checks staple_walk_owner before launching inline resume
-
 const api = typeof browser !== 'undefined' ? browser : chrome;
-
-// Fix 1: safeSession shim — falls back to storage.local on Firefox where storage.session is unavailable
-const safeSession = {
-  get: (keys) => new Promise(resolve => {
-    try {
-      (api.storage.session || api.storage.local).get(keys, resolve);
-    } catch(e) { resolve({}); }
-  }),
-  set: (data) => new Promise(resolve => {
-    try {
-      (api.storage.session || api.storage.local).set(data, resolve);
-    } catch(e) { resolve(); }
-  }),
-  remove: (keys) => new Promise(resolve => {
-    try {
-      (api.storage.session || api.storage.local).remove(keys, resolve);
-    } catch(e) { resolve(); }
-  })
-};
+const safeSession = api.storage.session || api.storage.local;
 
 let elementMap = [];
-
-// Fix 7: Staple-owned element IDs used to filter scrapeElements and pause observer during insertions
-const STAPLE_IDS = ['st-buddy', 'st-bubble', 'st-inline-box', 'sb-hover-zone'];
+let midFlowSendGuard = false;
 
 function scrapeElements() {
   const selectors = [
@@ -45,9 +16,6 @@ function scrapeElements() {
   const map = [];
 
   elements.forEach((el, i) => {
-    // Fix 7: skip any element that is or lives inside a Staple-injected element
-    if (el.closest(STAPLE_IDS.map(id => '#' + id).join(', '))) return;
-
     const rect = el.getBoundingClientRect();
     const label = (
       el.innerText?.trim() ||
@@ -85,15 +53,6 @@ function startObserver() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-// Fix 7: pause observer around a DOM insertion to prevent scrapeElements re-runs on Staple's own nodes
-function withObserverPaused(fn) {
-  if (observer) observer.disconnect();
-  fn();
-  if (observer && document.body) {
-    observer.observe(document.body, { childList: true, subtree: true });
-  }
-}
-
 // SPA navigation detection: intercept pushState/replaceState and popstate
 (function installSpaNavigation() {
   function onUrlChange() {
@@ -104,6 +63,9 @@ function withObserverPaused(fn) {
         api.storage.local.get(['activeSteps', 'activeStepIndex'], resolve);
       });
       if (stored.activeSteps && stored.activeSteps.length > 0) {
+        if (midFlowSendGuard) { console.log('[Staple Step] midFlowSendGuard active, skipping duplicate PAGE_CHANGED_MID_FLOW'); return; }
+        midFlowSendGuard = true;
+        setTimeout(() => { midFlowSendGuard = false; }, 15000);
         console.log('[Staple Step] active task mid-flow on URL change, sending PAGE_CHANGED_MID_FLOW');
         const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
         runtime.sendMessage({
@@ -140,23 +102,21 @@ function injectCharacter() {
   if (!document.body) return;
   if (document.getElementById('st-buddy')) return;
 
-  // Fix 7: pause observer while injecting Staple's own DOM nodes
-  withObserverPaused(() => {
-    const buddy = document.createElement('div');
-    buddy.id = 'st-buddy';
-    buddy.innerHTML = `
-      <div id="st-body">
-        <div id="st-eye-left"></div>
-        <div id="st-eye-right"></div>
-      </div>
-    `;
-    buddy.addEventListener('click', handleBuddyClick);
-    document.body.appendChild(buddy);
+  const buddy = document.createElement('div');
+  buddy.id = 'st-buddy';
 
-    const bubble = document.createElement('div');
-    bubble.id = 'st-bubble';
-    document.body.appendChild(bubble);
-  });
+  const cat = document.createElement('div');
+  cat.id = 'st-cat';
+  cat.className = 'state-idle';
+  cat.style.backgroundImage = `url('${api.runtime.getURL('cat_sprite.png')}')`;
+  buddy.appendChild(cat);
+
+  buddy.addEventListener('click', handleBuddyClick);
+  document.body.appendChild(buddy);
+
+  const bubble = document.createElement('div');
+  bubble.id = 'st-bubble';
+  document.body.appendChild(bubble);
 
   document.addEventListener('click', e => {
     const box = document.getElementById('st-inline-box');
@@ -166,81 +126,122 @@ function injectCharacter() {
       }
     }
   });
+
+  startIdleCleanTimer();
+}
+
+let idleCleanTimer = null;
+
+function startIdleCleanTimer() {
+  if (idleCleanTimer) clearTimeout(idleCleanTimer);
+  scheduleCleanAnimation();
+}
+
+function scheduleCleanAnimation() {
+  const delay = 15000 + Math.random() * 15000;
+  idleCleanTimer = setTimeout(() => {
+    const cat = document.getElementById('st-cat');
+    if (cat && cat.className === 'state-idle') {
+      setCharacterState('clean');
+      cat.addEventListener('animationend', function onCleanEnd() {
+        cat.removeEventListener('animationend', onCleanEnd);
+        if (cat.className === 'state-clean') {
+          setCharacterState('idle');
+        }
+      }, { once: true });
+    }
+    scheduleCleanAnimation();
+  }, delay);
 }
 
 let currentHighlight = null;
 
-// Fix 5: proximity listener cleanup function stored here; called by removeHoverZone and resetCharacter
-let proximityListenerCleanup = null;
+let walkTransitionEndHandler = null;
 
-// Fix 5: replace static hover zone div with a document-level mousemove proximity check
-function removeHoverZone() {
-  // Fix 5: remove old static div if it still exists from a previous session
-  const existing = document.getElementById('sb-hover-zone');
-  if (existing) existing.remove();
-
-  // Fix 5: tear down the proximity listener
-  if (proximityListenerCleanup) {
-    proximityListenerCleanup();
-    proximityListenerCleanup = null;
-  }
-}
-
-// Fix 5: attach a mousemove listener that fires onTrigger when the cursor is within 40px of el
-function attachProximityListener(el, onTrigger) {
-  let triggered = false;
-  function onMouseMove(e) {
-    if (triggered) return;
-    const rect = el.getBoundingClientRect();
-    const inZone = (
-      e.clientX >= rect.left - 40 &&
-      e.clientX <= rect.right + 40 &&
-      e.clientY >= rect.top - 40 &&
-      e.clientY <= rect.bottom + 40
-    );
-    if (inZone) {
-      triggered = true;
-      document.removeEventListener('mousemove', onMouseMove);
-      console.log('[Staple Step] proximity trigger fired for element', el.tagName, el.id || el.className);
-      onTrigger();
-    }
-  }
-  document.addEventListener('mousemove', onMouseMove);
-  console.log('[Staple Step] proximity listener attached — 40px zone around', el.tagName, el.id || el.className);
-  return () => document.removeEventListener('mousemove', onMouseMove);
-}
-
-// Fix 3: watchTarget removed — moveCharacter no longer sets it; handleWatchElement does its own definitive lookup
 function moveCharacter(x, y) {
   const buddy = document.getElementById('st-buddy');
   const bubble = document.getElementById('st-bubble');
+  const cat = document.getElementById('st-cat');
 
   console.log('[Staple Step] moveCharacter to (', x, ',', y, ')');
 
-  setCharacterState('walking');
+  const buddyRect = buddy.getBoundingClientRect();
+  const currentLeft = buddyRect.left;
+  const currentTop = buddyRect.top;
+  const currentCenterX = currentLeft + 40;
+  const currentCenterY = currentTop + 40;
 
-  buddy.style.position = 'fixed';
-  buddy.style.left = `${x - 22}px`;
-  buddy.style.top = `${y - 70}px`;
+  // Cancel any in-progress walk: pin at current computed position
+  buddy.style.transition = 'none';
+  buddy.style.left = `${currentLeft}px`;
+  buddy.style.top = `${currentTop}px`;
   buddy.style.bottom = 'auto';
   buddy.style.right = 'auto';
+  void buddy.offsetHeight;
+
+  // Set direction before transition starts
+  if (x < currentCenterX) {
+    cat.style.transform = 'scaleX(-1)';
+  } else if (x > currentCenterX) {
+    cat.style.transform = 'scaleX(1)';
+  }
+
+  setCharacterState('walking');
+
+  // Calculate target position, distance, and transition duration
+  const targetLeft = Math.max(5, Math.min(x - 40, window.innerWidth - 85));
+  const targetTop = Math.max(5, Math.min(y - 90, window.innerHeight - 85));
+  const targetCenterX = targetLeft + 40;
+  const targetCenterY = targetTop + 40;
+  const dx = targetCenterX - currentCenterX;
+  const dy = targetCenterY - currentCenterY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const duration = Math.max(0.15, Math.min(distance / 300, 3.0));
+
+  // Remove previous transitionend listener
+  if (walkTransitionEndHandler) {
+    buddy.removeEventListener('transitionend', walkTransitionEndHandler);
+    walkTransitionEndHandler = null;
+  }
+
+  const walkDone = new Promise(resolve => {
+    function onWalkEnd(e) {
+      if (e.propertyName !== 'left' && e.propertyName !== 'top') return;
+      buddy.removeEventListener('transitionend', onWalkEnd);
+      if (walkTransitionEndHandler === onWalkEnd) walkTransitionEndHandler = null;
+      setCharacterState('paw');
+      setTimeout(resolve, 1000);
+    }
+
+    if (distance < 1) {
+      setCharacterState('paw');
+      setTimeout(resolve, 1000);
+    } else {
+      walkTransitionEndHandler = onWalkEnd;
+      buddy.addEventListener('transitionend', onWalkEnd);
+    }
+  });
+
+  buddy.style.position = 'fixed';
+  buddy.style.transition = `left ${duration}s linear, top ${duration}s linear`;
+  buddy.style.left = `${targetLeft}px`;
+  buddy.style.top = `${targetTop}px`;
 
   bubble.style.left = `${Math.min(x, window.innerWidth - 280)}px`;
-  bubble.style.top = `${y - 140}px`;
+  bubble.style.top = `${Math.max(5, y - 140)}px`;
   bubble.style.bottom = 'auto';
-
-  setTimeout(() => setCharacterState('idle'), 700);
 
   if (currentHighlight) currentHighlight.classList.remove('st-highlight');
 
-  // Fix 3: just apply the highlight visually; watchTarget is NOT set here
   let target = document.elementFromPoint(x, y);
   console.log('[Staple Step] moveCharacter elementFromPoint returned:', target?.tagName, target?.className || target?.id || '');
-  if (target && !STAPLE_IDS.includes(target.id)) {
+  if (target && target.id !== 'st-buddy' && target.id !== 'st-bubble') {
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     target.classList.add('st-highlight');
     currentHighlight = target;
   }
+
+  return walkDone;
 }
 
 function showBubble(text) {
@@ -249,21 +250,94 @@ function showBubble(text) {
   bubble.innerText = text;
 }
 
-let inlineSteps = [];
-let inlineStepIndex = 0;
-let inlineAdvanceResolve = null;
+async function walkHome() {
+  const buddy = document.getElementById('st-buddy');
+  const cat = document.getElementById('st-cat');
+  if (!buddy) return;
 
-function inlineWaitForAdvance() {
+  const targetLeft = window.innerWidth - 100;
+  const targetTop = window.innerHeight - 160;
+  const targetCenterX = targetLeft + 40;
+
+  const buddyRect = buddy.getBoundingClientRect();
+  const currentLeft = buddyRect.left;
+  const currentTop = buddyRect.top;
+  const currentCenterX = currentLeft + 40;
+  const currentCenterY = currentTop + 40;
+
+  const dx = targetCenterX - currentCenterX;
+  const dy = targetTop + 40 - currentCenterY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const duration = Math.max(0.15, Math.min(distance / 300, 3.0));
+
+  if (cat) cat.style.transform = 'scaleX(1)';
+
+  setCharacterState('walking');
+
+  buddy.style.transition = 'none';
+  buddy.style.left = `${currentLeft}px`;
+  buddy.style.top = `${currentTop}px`;
+  buddy.style.bottom = 'auto';
+  buddy.style.right = 'auto';
+  void buddy.offsetHeight;
+
+  if (walkTransitionEndHandler) {
+    buddy.removeEventListener('transitionend', walkTransitionEndHandler);
+    walkTransitionEndHandler = null;
+  }
+
   return new Promise(resolve => {
-    inlineAdvanceResolve = resolve;
+    function onHomeEnd(e) {
+      if (e.propertyName !== 'left' && e.propertyName !== 'top') return;
+      buddy.removeEventListener('transitionend', onHomeEnd);
+      if (walkTransitionEndHandler === onHomeEnd) walkTransitionEndHandler = null;
+      setCharacterState('sleep');
+      resolve();
+    }
+
+    if (distance < 1) {
+      setCharacterState('sleep');
+      resolve();
+    } else {
+      walkTransitionEndHandler = onHomeEnd;
+      buddy.addEventListener('transitionend', onHomeEnd);
+    }
+
+    buddy.style.transition = `left ${duration}s linear, top ${duration}s linear`;
+    buddy.style.left = `${targetLeft}px`;
+    buddy.style.top = `${targetTop}px`;
   });
 }
 
-function handleBuddyClick(e) {
+let inlineSteps = [];
+let inlineStepIndex = 0;
+let inlineAdvanceResolve = null;
+let inlineTimeout = null;
+
+function inlineWaitForAdvance() {
+  return new Promise(resolve => {
+    let resolved = false;
+    function advance() {
+      if (resolved) return;
+      resolved = true;
+      if (inlineTimeout) { clearTimeout(inlineTimeout); inlineTimeout = null; }
+      inlineAdvanceResolve = null;
+      resolve();
+    }
+    inlineAdvanceResolve = advance;
+    inlineTimeout = setTimeout(advance, 8000);
+  });
+}
+
+async function handleBuddyClick(e) {
   e.stopPropagation();
   if (inlineAdvanceResolve) {
     inlineAdvanceResolve();
-    inlineAdvanceResolve = null;
+    return;
+  }
+  const data = await new Promise(r => safeSession.get(['staple_walk_active'], r));
+  if (data && data.staple_walk_active) {
+    safeSession.set({ staple_advance_click: Date.now() });
     return;
   }
   const box = document.getElementById('st-inline-box');
@@ -279,16 +353,13 @@ function showInlineBox() {
   let isNew = false;
   if (!box) {
     isNew = true;
-    // Fix 7: pause observer while injecting the inline box
-    withObserverPaused(() => {
-      box = document.createElement('div');
-      box.id = 'st-inline-box';
-      box.innerHTML = `
-        <textarea id="st-inline-input" placeholder="Ask Staple..." rows="1"></textarea>
-        <button id="st-inline-send">&rarr;</button>
-      `;
-      document.body.appendChild(box);
-    });
+    box = document.createElement('div');
+    box.id = 'st-inline-box';
+    box.innerHTML = `
+      <textarea id="st-inline-input" placeholder="Ask Staple..." rows="1"></textarea>
+      <button id="st-inline-send">&rarr;</button>
+    `;
+    document.body.appendChild(box);
 
     const input = document.getElementById('st-inline-input');
     const sendBtn = document.getElementById('st-inline-send');
@@ -311,17 +382,41 @@ function showInlineBox() {
 
   const buddy = document.getElementById('st-buddy');
   const buddyRect = buddy.getBoundingClientRect();
-  const isRightHalf = buddyRect.left > window.innerWidth / 2;
+  const buddyCenterX = buddyRect.left + 40;
+  const isRightHalf = buddyCenterX > window.innerWidth / 2;
 
   box.style.top = '';
+  box.style.bottom = '';
   box.style.left = '';
   box.style.right = '';
-  box.style.bottom = '80px';
 
   if (isRightHalf) {
-    box.style.left = '20px';
+    box.style.right = `${window.innerWidth - buddyRect.right}px`;
   } else {
-    box.style.right = '20px';
+    box.style.left = `${buddyRect.left}px`;
+  }
+
+  const spaceAbove = buddyRect.top;
+  if (spaceAbove >= 100) {
+    box.style.bottom = `${window.innerHeight - buddyRect.top + 10}px`;
+  } else {
+    box.style.top = `${buddyRect.bottom + 10}px`;
+  }
+
+  const boxWidth = 260;
+  const clampMargin = 5;
+  if (isRightHalf) {
+    const rightPx = parseInt(box.style.right) || 0;
+    if (rightPx < clampMargin) box.style.right = `${clampMargin}px`;
+    if (window.innerWidth - rightPx - boxWidth < 0) {
+      box.style.right = `${window.innerWidth - boxWidth - clampMargin}px`;
+    }
+  } else {
+    const leftPx = parseInt(box.style.left) || 0;
+    if (leftPx < clampMargin) box.style.left = `${clampMargin}px`;
+    if (leftPx + boxWidth > window.innerWidth - clampMargin) {
+      box.style.left = `${window.innerWidth - boxWidth - clampMargin}px`;
+    }
   }
 
   box.style.display = 'flex';
@@ -358,7 +453,9 @@ async function handleInlineSubmit() {
   runtime.sendMessage({
     type: 'INLINE_QUERY',
     question,
-    elementMap
+    elementMap,
+    url: window.location.href,
+    title: document.title
   }, async response => {
     if (!response || !response.success) {
       showBubble(response?.error || 'Something went wrong.');
@@ -375,7 +472,22 @@ async function handleInlineSubmit() {
     if (result.steps && result.steps.length > 0) {
       await executeInlineSteps(result.steps);
     } else {
-      showBubble(result.summary || "Here's what I found.");
+      const catMessages = [
+        'Meow... I looked everywhere but could not find that. Mrrp.',
+        'Mrrrow, this page is a mystery to me. Purr...',
+        'Nyaa~ I searched high and low, but nothing matched. Meow.',
+        'Mew... your request is too elusive for this kitty. Mrrow.'
+      ];
+      const buddy = document.getElementById('st-buddy');
+      if (buddy) {
+        const r = buddy.getBoundingClientRect();
+        const bx = Math.min(r.left + 40, window.innerWidth - 280);
+        const by = Math.max(5, r.top - 10);
+        const bubble = document.getElementById('st-bubble');
+        bubble.style.left = `${bx}px`;
+        bubble.style.top = `${by}px`;
+      }
+      showBubble(catMessages[Math.floor(Math.random() * catMessages.length)]);
       setCharacterState('idle');
     }
   });
@@ -393,17 +505,19 @@ async function executeInlineSteps(steps) {
 
     if (step.elementId !== null && step.elementId !== undefined) {
       const target = elementMap.find(e => e.id === step.elementId);
+      let walkPromise = null;
       if (target) {
-        moveCharacter(target.x, target.y);
+        walkPromise = moveCharacter(target.x, target.y);
       }
       const label = steps.length > 1
         ? `(${i + 1}/${steps.length}) ${step.instruction}`
         : step.instruction;
       showBubble(label);
-      setCharacterState('idle');
 
       if (i < steps.length - 1) {
         await inlineWaitForAdvance();
+      } else if (walkPromise) {
+        await walkPromise;
       }
     } else {
       showBubble(step.instruction);
@@ -411,6 +525,7 @@ async function executeInlineSteps(steps) {
   }
 
   showBubble('✅ All done!');
+  await walkHome();
   setTimeout(() => {
     const bubble = document.getElementById('st-bubble');
     bubble.style.display = 'none';
@@ -421,23 +536,59 @@ async function executeInlineSteps(steps) {
   api.storage.local.remove(['activeSteps', 'activeStepIndex', 'elementMap']);
 }
 
+let idleSleepTimer = null;
+
 function setCharacterState(state) {
-  const body = document.getElementById('st-body');
-  if (!body) return;
-  body.className = '';
-  if (state === 'walking') body.classList.add('is-walking');
-  if (state === 'thinking') body.classList.add('is-thinking');
+  const cat = document.getElementById('st-cat');
+  if (!cat) return;
+  const stateMap = {
+    idle: 'state-idle',
+    walking: 'state-walking',
+    thinking: 'state-thinking',
+    paw: 'state-paw',
+    sleep: 'state-sleep',
+    clean: 'state-clean'
+  };
+  cat.className = stateMap[state] || 'state-idle';
+
+  if (idleSleepTimer) { clearTimeout(idleSleepTimer); idleSleepTimer = null; }
+
+  if (state === 'idle') {
+    idleSleepTimer = setTimeout(() => {
+      if (cat.className === 'state-idle') {
+        if (idleCleanTimer) { clearTimeout(idleCleanTimer); idleCleanTimer = null; }
+        cat.className = 'state-sleep';
+      }
+    }, 5000);
+  }
+
+  if (state === 'paw') {
+    cat.addEventListener('animationend', function onPawEnd() {
+      cat.removeEventListener('animationend', onPawEnd);
+      if (cat.className === 'state-paw') {
+        setCharacterState('idle');
+      }
+    }, { once: true });
+  }
 }
 
 function resetCharacter() {
   const buddy = document.getElementById('st-buddy');
   const bubble = document.getElementById('st-bubble');
+  const cat = document.getElementById('st-cat');
   if (!buddy) return;
 
+  if (walkTransitionEndHandler) {
+    buddy.removeEventListener('transitionend', walkTransitionEndHandler);
+    walkTransitionEndHandler = null;
+  }
+  buddy.style.transition = '';
   buddy.style.left = '';
   buddy.style.top = '';
   buddy.style.bottom = '80px';
   buddy.style.right = '20px';
+
+  if (cat) cat.style.transform = 'scaleX(1)';
 
   if (bubble) {
     bubble.style.display = 'none';
@@ -450,135 +601,32 @@ function resetCharacter() {
     currentHighlight = null;
   }
 
-  // Fix 5: clean up proximity listener on reset
-  removeHoverZone();
-
   setCharacterState('idle');
-}
-
-const STORAGE_KEY = 'staple_interaction';
-
-async function handleWatchElement(msg) {
-  console.log('[Staple Step] WATCH_ELEMENT received - elementId:', msg.elementId, 'delay:', msg.delay);
-
-  // Fix 3: do a fresh definitive element lookup here instead of relying on watchTarget from moveCharacter
-  // First try finding by elementId in the current map
-  let mapTarget = elementMap.find(e => e.id === msg.elementId);
-  if (!mapTarget) {
-    console.log('[Staple Step] WATCH_ELEMENT - elementId not in map, re-scraping');
-    elementMap = scrapeElements();
-    mapTarget = elementMap.find(e => e.id === msg.elementId);
-  }
-
-  let el = null;
-
-  // Fix 3: scan DOM for the element by label match — more reliable than stale coordinate lookup
-  if (mapTarget) {
-    const allEls = document.querySelectorAll(
-      'button, a, input, select, textarea, [role="button"], [role="link"], ' +
-      '[role="menuitem"], [role="tab"], [role="checkbox"], [role="switch"], nav *, header *'
-    );
-    for (const candidate of allEls) {
-      if (candidate.closest(STAPLE_IDS.map(id => '#' + id).join(', '))) continue;
-      const rect = candidate.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        const label = (
-          candidate.innerText?.trim() ||
-          candidate.getAttribute('aria-label') ||
-          candidate.getAttribute('placeholder') ||
-          candidate.getAttribute('title') ||
-          candidate.getAttribute('alt') ||
-          candidate.tagName
-        );
-        if (label && label.slice(0, 80) === mapTarget.label) {
-          el = candidate;
-          console.log('[Staple Step] WATCH_ELEMENT - found by label match:', el.tagName, label.slice(0, 40));
-          break;
-        }
-      }
-    }
-  }
-
-  if (!el) {
-    console.log('[Staple Step] WATCH_ELEMENT - element not found, writing failure signal');
-    // Fix 4: write a failure signal so popup.js poll can detect it and advance rather than hanging
-    await safeSession.set({
-      [STORAGE_KEY]: { elementId: msg.elementId, timestamp: Date.now(), failed: true }
-    });
-    return;
-  }
-
-  // Fix 3: scroll the definitively-found element into view and wait for layout to settle
-  el.scrollIntoView({ behavior: 'instant', block: 'center' });
-  await new Promise(r => setTimeout(r, 200));
-
-  // Fix 3: re-check rect after scroll so proximity zone is accurate
-  const rect = el.getBoundingClientRect();
-  console.log('[Staple Step] WATCH_ELEMENT - element rect after scroll:', Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), 'x', Math.round(rect.height));
-
-  let triggered = false;
-
-  function trigger() {
-    if (triggered) return;
-    triggered = true;
-    console.log('[Staple Step] WATCH_ELEMENT - trigger FIRED! elementId:', msg.elementId);
-    removeHoverZone();
-
-    const delay = msg.delay || 2000;
-    console.log('[Staple Step] WATCH_ELEMENT - waiting', delay, 'ms before signalling interaction');
-    setTimeout(async () => {
-      const payload = { elementId: msg.elementId, timestamp: Date.now() };
-      console.log('[Staple Step] WATCH_ELEMENT - writing to safeSession:', payload);
-      await safeSession.set({ [STORAGE_KEY]: payload });
-      console.log('[Staple Step] WATCH_ELEMENT - safeSession write complete');
-    }, delay);
-  }
-
-  // Attach click listener directly on the element and up to 3 ancestors
-  const listenTargets = [el];
-  let p = el.parentElement;
-  for (let i = 0; i < 3 && p; i++, p = p.parentElement) {
-    listenTargets.push(p);
-  }
-  listenTargets.forEach(t => {
-    t.addEventListener('mouseenter', trigger);
-    t.addEventListener('click', trigger);
-  });
-  console.log('[Staple Step] WATCH_ELEMENT - click+mouseenter listeners attached to', listenTargets.length, 'targets');
-
-  // Fix 5: replace static hover zone with proximity mousemove listener
-  removeHoverZone();
-  proximityListenerCleanup = attachProximityListener(el, trigger);
+  startIdleCleanTimer();
 }
 
 const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
 runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_ELEMENTS') {
     elementMap = scrapeElements();
-    sendResponse(elementMap);
+    sendResponse({ elementMap, url: window.location.href, title: document.title });
   }
   if (msg.type === 'MOVE_CHARACTER') {
     const target = elementMap.find(e => e.id === msg.elementId);
     if (target) moveCharacter(target.x, target.y);
-    // Fix 2: signal completion so popup.js can await this before sending WATCH_ELEMENT
-    sendResponse({ done: true });
   }
   if (msg.type === 'SHOW_BUBBLE') {
     showBubble(msg.text);
-    // Fix 2: signal completion
-    sendResponse({ done: true });
   }
   if (msg.type === 'SET_STATE') {
     setCharacterState(msg.state);
-    // Fix 2: signal completion
-    sendResponse({ done: true });
   }
   if (msg.type === 'RESET_CHARACTER') {
     resetCharacter();
-    sendResponse({ done: true });
   }
-  if (msg.type === 'WATCH_ELEMENT') {
-    handleWatchElement(msg);
+  if (msg.type === 'WALK_HOME') {
+    walkHome().then(() => sendResponse(true));
+    return true;
   }
   return true;
 });
@@ -597,17 +645,15 @@ init();
 
 async function checkMidFlowResume() {
   const data = await new Promise(resolve => {
-    api.storage.local.get(['activeSteps', 'activeStepIndex', 'conversationHistory', 'staple_walk_owner'], resolve);
+    api.storage.local.get(['activeSteps', 'activeStepIndex', 'conversationHistory'], resolve);
   });
 
   if (!data.activeSteps || !data.activeSteps.length) return;
   if (data.activeStepIndex >= data.activeSteps.length) return;
 
-  // Fix 8: if the popup owns the walk, do not start a competing inline resume
-  if (data.staple_walk_owner === 'popup') {
-    console.log('[Staple Step] checkMidFlowResume - walk owned by popup, skipping inline resume');
-    return;
-  }
+  if (midFlowSendGuard) { console.log('[Staple Step] checkMidFlowResume - guard active, skipping'); return; }
+  midFlowSendGuard = true;
+  setTimeout(() => { midFlowSendGuard = false; }, 15000);
 
   await new Promise(r => setTimeout(r, 1500));
 
@@ -646,3 +692,20 @@ async function checkMidFlowResume() {
 }
 
 checkMidFlowResume();
+
+window.addEventListener('resize', () => {
+  const buddy = document.getElementById('st-buddy');
+  if (!buddy || !buddy.style.left || !buddy.style.top) return;
+  const buddyLeft = parseInt(buddy.style.left);
+  const buddyTop = parseInt(buddy.style.top);
+  if (isNaN(buddyLeft) || isNaN(buddyTop)) return;
+  buddy.style.left = `${Math.max(5, Math.min(buddyLeft, window.innerWidth - 85))}px`;
+  buddy.style.top = `${Math.max(5, Math.min(buddyTop, window.innerHeight - 85))}px`;
+  const bubble = document.getElementById('st-bubble');
+  if (bubble && bubble.style.top) {
+    const bubbleTop = parseInt(bubble.style.top);
+    if (!isNaN(bubbleTop)) {
+      bubble.style.top = `${Math.max(5, bubbleTop)}px`;
+    }
+  }
+});
