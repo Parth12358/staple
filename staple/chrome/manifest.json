@@ -3,6 +3,7 @@
   "name": "Staple",
   "version": "1.0",
   "description": "AI that walks you through any UI",
+  "icons": { "128": "icon.svg" },
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [{
@@ -12,5 +13,5 @@
     "run_at": "document_idle"
   }],
   "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html" }
+  "action": { "default_popup": "popup.html", "default_icon": "icon.svg" }
 }

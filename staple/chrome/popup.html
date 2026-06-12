@@ -79,6 +79,23 @@
       flex-shrink: 0;
     }
     #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    #walk-row {
+      display: none;
+      padding: 0 12px 10px 12px;
+      flex-shrink: 0;
+    }
+    #walk-next-btn {
+      width: 100%;
+      background: #6366f1;
+      border: none;
+      border-radius: 8px;
+      padding: 8px;
+      color: white;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    #walk-next-btn:hover { background: #4f46e5; }
     .msg-user {
       background: #6366f1;
       border-radius: 12px 12px 2px 12px;
@@ -167,6 +184,9 @@
     <div id="input-row">
       <input id="user-input" placeholder="Ask Staple..." />
       <button id="send-btn">&rarr;</button>
+    </div>
+    <div id="walk-row">
+      <button id="walk-next-btn">Next &#8594;</button>
     </div>
   </div>
 
