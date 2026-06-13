@@ -29,6 +29,7 @@ function showSettings() {
 function showChat() {
   document.getElementById('settings-view').style.display = 'none';
   document.getElementById('chat-view').style.display = 'flex';
+  focusInput();
 }
 
 async function handleSaveKeys() {
@@ -218,16 +219,23 @@ async function handleSend() {
 
   input.disabled = false;
   sendBtn.disabled = false;
-  input.focus();
+  focusInput();
+}
+
+function focusInput() {
+  const input = document.getElementById('user-input');
+  if (input && !input.disabled) {
+    setTimeout(() => input.focus(), 50);
+  }
 }
 
 function bindEvents() {
   document.getElementById('send-btn').onclick = handleSend;
-  document.getElementById('user-input').onkeydown = e => e.key === 'Enter' && handleSend();
+  document.getElementById('user-input').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } };
   document.getElementById('gear-btn').onclick = showSettings;
   document.getElementById('back-btn').onclick = showChat;
   document.getElementById('save-btn').onclick = handleSaveKeys;
-  document.getElementById('user-input').focus();
+  focusInput();
 }
 
 if (document.readyState === 'loading') {
