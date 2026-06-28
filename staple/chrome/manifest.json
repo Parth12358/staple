@@ -3,7 +3,7 @@
   "name": "Staple",
   "version": "1.0",
   "description": "AI that walks you through any UI",
-  "icons": { "128": "icon.svg" },
+  "icons": { "128": "cat_icon.png" },
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [{
@@ -13,9 +13,9 @@
     "run_at": "document_idle"
   }],
   "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_icon": "icon.svg" },
+  "action": { "default_popup": "popup.html", "default_icon": "cat_icon.png" },
   "web_accessible_resources": [{
-    "resources": ["cat_sprite.png"],
+    "resources": ["cat_sprite.png", "cat_icon.png"],
     "matches": ["<all_urls>"]
   }]
 }

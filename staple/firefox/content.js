@@ -1,8 +1,6 @@
 const api = typeof browser !== 'undefined' ? browser : chrome;
-const safeSession = api.storage.session || api.storage.local;
 
 let elementMap = [];
-let midFlowSendGuard = false;
 
 function scrapeElements() {
   const selectors = [
@@ -31,76 +29,44 @@ function scrapeElements() {
         id: i,
         label: label.slice(0, 80),
         tag: el.tagName,
-        x: Math.round(rect.left + rect.width / 2),
-        y: Math.round(rect.top + rect.height / 2)
+        el: el,
+        x: Math.round(rect.left + rect.width / 2 + window.scrollX),
+        y: Math.round(rect.top + rect.height / 2 + window.scrollY)
       });
     }
   });
 
   const trimmed = map.slice(0, 150);
-  console.log('[Staple] Element map:', trimmed);
+  if (!trimmed.length) {
+    console.warn('[Staple][content:scrapeElements] No elements scraped from page', { url: window.location.href, readyState: document.readyState });
+  }
   return trimmed;
 }
 
 let observer = null;
+let observerTimeout = null;
 
 function startObserver() {
   if (!document.body) return;
   if (observer) observer.disconnect();
   observer = new MutationObserver(() => {
-    elementMap = scrapeElements();
+    if (observerTimeout) return;
+    observerTimeout = setTimeout(() => {
+      elementMap = scrapeElements();
+      observerTimeout = null;
+    }, 300);
   });
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-// SPA navigation detection: intercept pushState/replaceState and popstate
-(function installSpaNavigation() {
-  function onUrlChange() {
-    setTimeout(async () => {
-      console.log('[Staple Step] URL change detected:', window.location.href);
-      elementMap = scrapeElements();
-      const stored = await new Promise(resolve => {
-        api.storage.local.get(['activeSteps', 'activeStepIndex'], resolve);
-      });
-      if (stored.activeSteps && stored.activeSteps.length > 0) {
-        if (midFlowSendGuard) { console.log('[Staple Step] midFlowSendGuard active, skipping duplicate PAGE_CHANGED_MID_FLOW'); return; }
-        midFlowSendGuard = true;
-        setTimeout(() => { midFlowSendGuard = false; }, 15000);
-        console.log('[Staple Step] active task mid-flow on URL change, sending PAGE_CHANGED_MID_FLOW');
-        const runtime = typeof browser !== 'undefined' ? browser.runtime : chrome.runtime;
-        runtime.sendMessage({
-          type: 'PAGE_CHANGED_MID_FLOW',
-          elementMap,
-          url: window.location.href,
-          activeSteps: stored.activeSteps,
-          activeStepIndex: stored.activeStepIndex || 0
-        }, () => {});
-      }
-    }, 1500);
-  }
-
-  const originalPushState = history.pushState.bind(history);
-  history.pushState = function(...args) {
-    originalPushState(...args);
-    window.dispatchEvent(new Event('staple:urlchange'));
-  };
-
-  const originalReplaceState = history.replaceState.bind(history);
-  history.replaceState = function(...args) {
-    originalReplaceState(...args);
-    window.dispatchEvent(new Event('staple:urlchange'));
-  };
-
-  window.addEventListener('popstate', () => {
-    window.dispatchEvent(new Event('staple:urlchange'));
-  });
-
-  window.addEventListener('staple:urlchange', onUrlChange);
-})();
-
 function injectCharacter() {
   if (!document.body) return;
-  if (document.getElementById('st-buddy')) return;
+  const existing = document.getElementById('st-buddy');
+  if (existing) existing.remove();
+  const exBubble = document.getElementById('st-bubble');
+  if (exBubble) exBubble.remove();
+  const exBox = document.getElementById('st-inline-box');
+  if (exBox) exBox.remove();
 
   const buddy = document.createElement('div');
   buddy.id = 'st-buddy';
@@ -131,6 +97,7 @@ function injectCharacter() {
 }
 
 let idleCleanTimer = null;
+let cleanEndListener = null;
 
 function startIdleCleanTimer() {
   if (idleCleanTimer) clearTimeout(idleCleanTimer);
@@ -143,68 +110,62 @@ function scheduleCleanAnimation() {
     const cat = document.getElementById('st-cat');
     if (cat && cat.className === 'state-idle') {
       setCharacterState('clean');
-      cat.addEventListener('animationend', function onCleanEnd() {
-        cat.removeEventListener('animationend', onCleanEnd);
+      cleanEndListener = function onCleanEnd() {
+        cat.removeEventListener('animationend', cleanEndListener);
+        cleanEndListener = null;
         if (cat.className === 'state-clean') {
           setCharacterState('idle');
         }
-      }, { once: true });
+      };
+      cat.addEventListener('animationend', cleanEndListener);
     }
     scheduleCleanAnimation();
   }, delay);
 }
 
-let currentHighlight = null;
-
 let walkTransitionEndHandler = null;
 
-function moveCharacter(x, y) {
+function moveCharacter(vx, vy) {
+  console.log('[Staple][content:moveCharacter] Called', { x: vx, y: vy, scrollX: window.scrollX, scrollY: window.scrollY });
   const buddy = document.getElementById('st-buddy');
   const bubble = document.getElementById('st-bubble');
   const cat = document.getElementById('st-cat');
 
-  console.log('[Staple Step] moveCharacter to (', x, ',', y, ')');
-
-  const buddyRect = buddy.getBoundingClientRect();
-  const currentLeft = buddyRect.left;
-  const currentTop = buddyRect.top;
-  const currentCenterX = currentLeft + 40;
-  const currentCenterY = currentTop + 40;
-
-  // Cancel any in-progress walk: pin at current computed position
-  buddy.style.transition = 'none';
-  buddy.style.left = `${currentLeft}px`;
-  buddy.style.top = `${currentTop}px`;
-  buddy.style.bottom = 'auto';
-  buddy.style.right = 'auto';
-  void buddy.offsetHeight;
-
-  // Set direction before transition starts
-  if (x < currentCenterX) {
-    cat.style.transform = 'scaleX(-1)';
-  } else if (x > currentCenterX) {
-    cat.style.transform = 'scaleX(1)';
-  }
-
-  setCharacterState('walking');
-
-  // Calculate target position, distance, and transition duration
-  const targetLeft = Math.max(5, Math.min(x - 40, window.innerWidth - 85));
-  const targetTop = Math.max(5, Math.min(y - 90, window.innerHeight - 85));
-  const targetCenterX = targetLeft + 40;
-  const targetCenterY = targetTop + 40;
-  const dx = targetCenterX - currentCenterX;
-  const dy = targetCenterY - currentCenterY;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-  const duration = Math.max(0.15, Math.min(distance / 300, 3.0));
-
-  // Remove previous transitionend listener
   if (walkTransitionEndHandler) {
     buddy.removeEventListener('transitionend', walkTransitionEndHandler);
     walkTransitionEndHandler = null;
   }
 
-  const walkDone = new Promise(resolve => {
+  const buddyRect = buddy.getBoundingClientRect();
+  buddy.style.transition = 'none';
+  buddy.style.left = `${buddyRect.left}px`;
+  buddy.style.top = `${buddyRect.top}px`;
+  buddy.style.bottom = 'auto';
+  buddy.style.right = 'auto';
+  void buddy.offsetHeight;
+
+  const clampedX = Math.max(44, Math.min(vx, window.innerWidth - 44));
+  const clampedY = Math.max(64, Math.min(vy, window.innerHeight - 44));
+
+  const currentCX = buddyRect.left + 40;
+  const currentCY = buddyRect.top + 40;
+
+  if (clampedX < currentCX) {
+    cat.style.transform = 'scaleX(-1)';
+  } else if (clampedX > currentCX) {
+    cat.style.transform = 'scaleX(1)';
+  }
+
+  setCharacterState('walking');
+
+  const targetLeft = clampedX - 40;
+  const targetTop = clampedY - 70;
+  const dx = (targetLeft + 40) - currentCX;
+  const dy = (targetTop + 40) - currentCY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const duration = Math.max(0.15, Math.min(distance / 300, 3.0));
+
+  return new Promise(resolve => {
     function onWalkEnd(e) {
       if (e.propertyName !== 'left' && e.propertyName !== 'top') return;
       buddy.removeEventListener('transitionend', onWalkEnd);
@@ -220,34 +181,93 @@ function moveCharacter(x, y) {
       walkTransitionEndHandler = onWalkEnd;
       buddy.addEventListener('transitionend', onWalkEnd);
     }
+
+    buddy.style.position = 'fixed';
+    buddy.style.transition = `left ${duration}s linear, top ${duration}s linear`;
+    buddy.style.left = `${targetLeft}px`;
+    buddy.style.top = `${targetTop}px`;
+
+    bubble.style.left = `${Math.max(5, Math.min(clampedX, window.innerWidth - 280))}px`;
+    bubble.style.top = `${Math.max(5, Math.min(clampedY - 140, window.innerHeight - 80))}px`;
+    bubble.style.bottom = 'auto';
+
+    if (bubble._pendingText) {
+      bubble.innerText = bubble._pendingText;
+      bubble.style.display = 'block';
+      requestAnimationFrame(() => bubble.classList.add('visible'));
+    }
   });
-
-  buddy.style.position = 'fixed';
-  buddy.style.transition = `left ${duration}s linear, top ${duration}s linear`;
-  buddy.style.left = `${targetLeft}px`;
-  buddy.style.top = `${targetTop}px`;
-
-  bubble.style.left = `${Math.min(x, window.innerWidth - 280)}px`;
-  bubble.style.top = `${Math.max(5, y - 140)}px`;
-  bubble.style.bottom = 'auto';
-
-  if (currentHighlight) currentHighlight.classList.remove('st-highlight');
-
-  let target = document.elementFromPoint(x, y);
-  console.log('[Staple Step] moveCharacter elementFromPoint returned:', target?.tagName, target?.className || target?.id || '');
-  if (target && target.id !== 'st-buddy' && target.id !== 'st-bubble') {
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    target.classList.add('st-highlight');
-    currentHighlight = target;
-  }
-
-  return walkDone;
 }
+
+function getScrollContainer(el) {
+  let parent = el.parentElement;
+  while (parent) {
+    const style = window.getComputedStyle(parent);
+    if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && parent.scrollHeight > parent.clientHeight) {
+      return parent;
+    }
+    parent = parent.parentElement;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+let activeScrollCleanup = null;
+
+function waitForScrollEnd(container) {
+  if (activeScrollCleanup) {
+    activeScrollCleanup();
+    activeScrollCleanup = null;
+  }
+  return new Promise(resolve => {
+    let timer = null;
+    let fallback = null;
+    let cancelled = false;
+    let fallbackHit = false;
+
+    function finish() {
+      if (cancelled) return;
+      cancelled = true;
+      container.removeEventListener('scroll', onScroll);
+      if (timer) clearTimeout(timer);
+      if (fallback) clearTimeout(fallback);
+      activeScrollCleanup = null;
+      if (fallbackHit) {
+        console.warn('[Staple][content:waitForScrollEnd] Scroll end fallback fired', { scrollY: window.scrollY, scrollX: window.scrollX });
+      }
+      resolve();
+    }
+
+    function onScroll() {
+      if (cancelled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(finish, 150);
+    }
+
+    container.addEventListener('scroll', onScroll, { passive: true });
+    fallback = setTimeout(() => { fallbackHit = true; finish(); }, 1200);
+
+    activeScrollCleanup = finish;
+  });
+}
+
+let hideBubbleTimer = null;
 
 function showBubble(text) {
   const bubble = document.getElementById('st-bubble');
-  bubble.style.display = 'block';
+  if (hideBubbleTimer) { clearTimeout(hideBubbleTimer); hideBubbleTimer = null; }
   bubble.innerText = text;
+  bubble.style.display = 'block';
+  requestAnimationFrame(() => bubble.classList.add('visible'));
+}
+
+function hideBubble() {
+  const bubble = document.getElementById('st-bubble');
+  bubble.classList.remove('visible');
+  if (hideBubbleTimer) clearTimeout(hideBubbleTimer);
+  hideBubbleTimer = setTimeout(() => {
+    bubble.style.display = 'none';
+    hideBubbleTimer = null;
+  }, 150);
 }
 
 async function walkHome() {
@@ -309,37 +329,9 @@ async function walkHome() {
   });
 }
 
-let inlineSteps = [];
-let inlineStepIndex = 0;
-let inlineAdvanceResolve = null;
-let inlineTimeout = null;
-
-function inlineWaitForAdvance() {
-  return new Promise(resolve => {
-    let resolved = false;
-    function advance() {
-      if (resolved) return;
-      resolved = true;
-      if (inlineTimeout) { clearTimeout(inlineTimeout); inlineTimeout = null; }
-      inlineAdvanceResolve = null;
-      resolve();
-    }
-    inlineAdvanceResolve = advance;
-    inlineTimeout = setTimeout(advance, 8000);
-  });
-}
-
 async function handleBuddyClick(e) {
   e.stopPropagation();
-  if (inlineAdvanceResolve) {
-    inlineAdvanceResolve();
-    return;
-  }
-  const data = await new Promise(r => safeSession.get(['staple_walk_active'], r));
-  if (data && data.staple_walk_active) {
-    safeSession.set({ staple_advance_click: Date.now() });
-    return;
-  }
+  console.log('[Staple][content:handleBuddyClick] Cat clicked');
   const box = document.getElementById('st-inline-box');
   if (box && box.style.display !== 'none') {
     hideInlineBox();
@@ -349,6 +341,7 @@ async function handleBuddyClick(e) {
 }
 
 function showInlineBox() {
+  console.log('[Staple][content:showInlineBox] Showing inline box');
   let box = document.getElementById('st-inline-box');
   let isNew = false;
   if (!box) {
@@ -357,7 +350,7 @@ function showInlineBox() {
     box.id = 'st-inline-box';
     box.innerHTML = `
       <textarea id="st-inline-input" placeholder="Ask Staple..." rows="1"></textarea>
-      <button id="st-inline-send">&rarr;</button>
+      <button id="st-inline-send">Ask</button>
     `;
     document.body.appendChild(box);
 
@@ -438,8 +431,17 @@ function hideInlineBox() {
 
 async function handleInlineSubmit() {
   const input = document.getElementById('st-inline-input');
+  if (!input) {
+    console.error('[Staple][content:handleInlineSubmit] Input element missing from DOM');
+    return;
+  }
+  console.log('[Staple][content:handleInlineSubmit] CALLED', { question: input.value?.trim() || '' });
+
   const question = input.value.trim();
-  if (!question) return;
+  if (!question) {
+    console.warn('[Staple][content:handleInlineSubmit] Empty query submitted');
+    return;
+  }
 
   input.value = '';
   input.style.height = 'auto';
@@ -448,99 +450,92 @@ async function handleInlineSubmit() {
   setCharacterState('thinking');
   showBubble('Thinking...');
 
-  elementMap = scrapeElements();
+  const currentMap = scrapeElements();
+  elementMap = currentMap;
 
-  runtime.sendMessage({
-    type: 'INLINE_QUERY',
-    question,
-    elementMap,
-    url: window.location.href,
-    title: document.title
-  }, async response => {
-    if (!response || !response.success) {
-      showBubble(response?.error || 'Something went wrong.');
-      setCharacterState('idle');
-      return;
-    }
+  const serializableMap = currentMap.map(({ el, ...rest }) => rest);
 
-    const result = response.result;
+  console.log('[Staple][content:handleInlineSubmit] Sending QUERY to background', { question, elementMapSize: serializableMap.length });
 
-    if (!result.steps && result.elementId !== undefined) {
-      result.steps = [{ elementId: result.elementId, instruction: result.instruction || 'Here it is.' }];
-    }
+  let response;
+  try {
+    response = await runtime.sendMessage({
+      type: 'QUERY',
+      question,
+      elementMap: serializableMap,
+      url: window.location.href,
+      title: document.title
+    });
+  } catch (err) {
+    console.error('[Staple][content:handleInlineSubmit] sendMessage failed', { error: err.message });
+    showBubble('The extension background is not responding. Try reloading the extension.');
+    setCharacterState('idle');
+    return;
+  }
 
-    if (result.steps && result.steps.length > 0) {
-      await executeInlineSteps(result.steps);
-    } else {
-      const catMessages = [
-        'Meow... I looked everywhere but could not find that. Mrrp.',
-        'Mrrrow, this page is a mystery to me. Purr...',
-        'Nyaa~ I searched high and low, but nothing matched. Meow.',
-        'Mew... your request is too elusive for this kitty. Mrrow.'
-      ];
-      const buddy = document.getElementById('st-buddy');
-      if (buddy) {
-        const r = buddy.getBoundingClientRect();
-        const bx = Math.min(r.left + 40, window.innerWidth - 280);
-        const by = Math.max(5, r.top - 10);
-        const bubble = document.getElementById('st-bubble');
-        bubble.style.left = `${bx}px`;
-        bubble.style.top = `${by}px`;
-      }
-      showBubble(catMessages[Math.floor(Math.random() * catMessages.length)]);
-      setCharacterState('idle');
-    }
-  });
-}
+  console.log('[Staple][content:handleInlineSubmit] Response from background', { response: response ? { success: response.success, elementId: response.result?.elementId } : null });
 
-async function executeInlineSteps(steps) {
-  inlineSteps = steps;
-  inlineStepIndex = 0;
-  api.storage.local.set({ activeSteps: steps, activeStepIndex: 0, elementMap });
+  if (!response || !response.success) {
+    console.error('[Staple][content:handleInlineSubmit] Background returned error or null', { response: response || null });
+    showBubble(response?.error || 'Something went wrong.');
+    setCharacterState('idle');
+    return;
+  }
 
-  for (let i = 0; i < steps.length; i++) {
-    inlineStepIndex = i;
-    api.storage.local.set({ activeStepIndex: i });
-    const step = steps[i];
+  const result = response.result;
 
-    if (step.elementId !== null && step.elementId !== undefined) {
-      const target = elementMap.find(e => e.id === step.elementId);
-      let walkPromise = null;
-      if (target) {
-        walkPromise = moveCharacter(target.x, target.y);
-      }
-      const label = steps.length > 1
-        ? `(${i + 1}/${steps.length}) ${step.instruction}`
-        : step.instruction;
-      showBubble(label);
+  console.log('[Staple][content:handleInlineSubmit] Acting on result', { elementId: result.elementId, instruction: result.instruction?.slice(0, 50) });
 
-      if (i < steps.length - 1) {
-        await inlineWaitForAdvance();
-      } else if (walkPromise) {
-        await walkPromise;
-      }
-    } else {
-      showBubble(step.instruction);
+  if (result.elementId !== null && result.elementId !== undefined) {
+    const target = currentMap.find(e => e.id === result.elementId);
+    if (target && target.el) {
+      const bubble = document.getElementById('st-bubble');
+      bubble._pendingText = result.instruction;
+
+      target.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const container = getScrollContainer(target.el);
+      await waitForScrollEnd(container);
+
+      requestAnimationFrame(() => {
+        const rect = target.el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        moveCharacter(cx, cy);
+      });
     }
   }
 
-  showBubble('✅ All done!');
+  showBubble(result.instruction);
+
+  if (result.context) {
+    await new Promise(r => setTimeout(r, 3000));
+    showBubble(result.context);
+  }
+
+  await new Promise(r => setTimeout(r, 4000));
   await walkHome();
   setTimeout(() => {
-    const bubble = document.getElementById('st-bubble');
-    bubble.style.display = 'none';
+    hideBubble();
     resetCharacter();
   }, 3000);
-  inlineSteps = [];
-  inlineStepIndex = 0;
-  api.storage.local.remove(['activeSteps', 'activeStepIndex', 'elementMap']);
 }
 
 let idleSleepTimer = null;
+let pawEndListener = null;
 
 function setCharacterState(state) {
   const cat = document.getElementById('st-cat');
   if (!cat) return;
+
+  if (pawEndListener) {
+    cat.removeEventListener('animationend', pawEndListener);
+    pawEndListener = null;
+  }
+  if (cleanEndListener) {
+    cat.removeEventListener('animationend', cleanEndListener);
+    cleanEndListener = null;
+  }
+
   const stateMap = {
     idle: 'state-idle',
     walking: 'state-walking',
@@ -554,6 +549,7 @@ function setCharacterState(state) {
   if (idleSleepTimer) { clearTimeout(idleSleepTimer); idleSleepTimer = null; }
 
   if (state === 'idle') {
+    startIdleCleanTimer();
     idleSleepTimer = setTimeout(() => {
       if (cat.className === 'state-idle') {
         if (idleCleanTimer) { clearTimeout(idleCleanTimer); idleCleanTimer = null; }
@@ -563,12 +559,14 @@ function setCharacterState(state) {
   }
 
   if (state === 'paw') {
-    cat.addEventListener('animationend', function onPawEnd() {
-      cat.removeEventListener('animationend', onPawEnd);
+    pawEndListener = function onPawEnd() {
+      cat.removeEventListener('animationend', pawEndListener);
+      pawEndListener = null;
       if (cat.className === 'state-paw') {
         setCharacterState('idle');
       }
-    }, { once: true });
+    };
+    cat.addEventListener('animationend', pawEndListener);
   }
 }
 
@@ -578,11 +576,16 @@ function resetCharacter() {
   const cat = document.getElementById('st-cat');
   if (!buddy) return;
 
+  if (activeScrollCleanup) {
+    activeScrollCleanup();
+    activeScrollCleanup = null;
+  }
+
   if (walkTransitionEndHandler) {
     buddy.removeEventListener('transitionend', walkTransitionEndHandler);
     walkTransitionEndHandler = null;
   }
-  buddy.style.transition = '';
+  buddy.style.transition = 'none';
   buddy.style.left = '';
   buddy.style.top = '';
   buddy.style.bottom = '80px';
@@ -591,14 +594,9 @@ function resetCharacter() {
   if (cat) cat.style.transform = 'scaleX(1)';
 
   if (bubble) {
-    bubble.style.display = 'none';
+    hideBubble();
     bubble.style.left = '';
     bubble.style.top = '';
-  }
-
-  if (currentHighlight) {
-    currentHighlight.classList.remove('st-highlight');
-    currentHighlight = null;
   }
 
   setCharacterState('idle');
@@ -621,13 +619,6 @@ runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SET_STATE') {
     setCharacterState(msg.state);
   }
-  if (msg.type === 'RESET_CHARACTER') {
-    resetCharacter();
-  }
-  if (msg.type === 'WALK_HOME') {
-    walkHome().then(() => sendResponse(true));
-    return true;
-  }
   return true;
 });
 
@@ -642,56 +633,6 @@ function init() {
 }
 
 init();
-
-async function checkMidFlowResume() {
-  const data = await new Promise(resolve => {
-    api.storage.local.get(['activeSteps', 'activeStepIndex', 'conversationHistory'], resolve);
-  });
-
-  if (!data.activeSteps || !data.activeSteps.length) return;
-  if (data.activeStepIndex >= data.activeSteps.length) return;
-
-  if (midFlowSendGuard) { console.log('[Staple Step] checkMidFlowResume - guard active, skipping'); return; }
-  midFlowSendGuard = true;
-  setTimeout(() => { midFlowSendGuard = false; }, 15000);
-
-  await new Promise(r => setTimeout(r, 1500));
-
-  elementMap = scrapeElements();
-
-  runtime.sendMessage({
-    type: 'PAGE_CHANGED_MID_FLOW',
-    elementMap: elementMap,
-    url: window.location.href,
-    activeSteps: data.activeSteps,
-    activeStepIndex: data.activeStepIndex
-  }, async response => {
-    if (response && response.success && response.result.steps) {
-      if (response.result.steps.length > 0) {
-        await executeInlineSteps(response.result.steps);
-      } else if (response.result.summary) {
-        showBubble(response.result.summary);
-        setTimeout(() => {
-          const bubble = document.getElementById('st-bubble');
-          if (bubble) bubble.style.display = 'none';
-          resetCharacter();
-        }, 3000);
-        api.storage.local.remove(['activeSteps', 'activeStepIndex', 'elementMap']);
-      }
-    } else {
-      const step = data.activeSteps[data.activeStepIndex];
-      const match = elementMap.find(e =>
-        e.label.toLowerCase().includes(step.instruction.toLowerCase().slice(0, 10))
-      );
-      if (match) {
-        moveCharacter(match.x, match.y);
-        showBubble(`Continuing: ${step.instruction}`);
-      }
-    }
-  });
-}
-
-checkMidFlowResume();
 
 window.addEventListener('resize', () => {
   const buddy = document.getElementById('st-buddy');
@@ -709,3 +650,12 @@ window.addEventListener('resize', () => {
     }
   }
 });
+
+let scrollTimeout = null;
+window.addEventListener('scroll', () => {
+  if (scrollTimeout) clearTimeout(scrollTimeout);
+  scrollTimeout = setTimeout(() => {
+    elementMap = scrapeElements();
+    scrollTimeout = null;
+  }, 300);
+}, { passive: true });

@@ -5,7 +5,7 @@
     * { box-sizing: border-box; }
     body {
       width: 320px;
-      height: 480px;
+      height: auto;
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
       background: #0f0f0f;
@@ -19,102 +19,7 @@
       border-bottom: 1px solid #222;
       font-weight: 600;
       font-size: 14px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
       flex-shrink: 0;
-    }
-    #gear-btn, #back-btn {
-      background: none;
-      border: none;
-      color: #888;
-      cursor: pointer;
-      font-size: 16px;
-      padding: 0;
-    }
-    #gear-btn:hover, #back-btn:hover { color: white; }
-
-    #chat-view {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    #chat-container {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    #input-row {
-      display: flex;
-      gap: 8px;
-      padding: 12px;
-      border-top: 1px solid #222;
-      flex-shrink: 0;
-    }
-    #user-input {
-      flex: 1;
-      background: #1a1a1a;
-      border: 1px solid #333;
-      border-radius: 20px;
-      padding: 8px 14px;
-      color: white;
-      font-size: 13px;
-      outline: none;
-    }
-    #user-input::placeholder { color: #555; }
-    #user-input:disabled { opacity: 0.5; }
-    #send-btn {
-      background: #6366f1;
-      border: none;
-      border-radius: 50%;
-      width: 36px;
-      height: 36px;
-      color: white;
-      cursor: pointer;
-      font-size: 16px;
-      flex-shrink: 0;
-    }
-    #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    #walk-row {
-      display: none;
-      padding: 0 12px 10px 12px;
-      flex-shrink: 0;
-    }
-    #walk-next-btn {
-      width: 100%;
-      background: #6366f1;
-      border: none;
-      border-radius: 8px;
-      padding: 8px;
-      color: white;
-      font-size: 13px;
-      cursor: pointer;
-      font-weight: 600;
-    }
-    #walk-next-btn:hover { background: #4f46e5; }
-    .msg-user {
-      background: #6366f1;
-      border-radius: 12px 12px 2px 12px;
-      padding: 8px 12px;
-      font-size: 13px;
-      align-self: flex-end;
-      max-width: 80%;
-      word-wrap: break-word;
-    }
-    .msg-buddy {
-      background: #1a1a1a;
-      border: 1px solid #2a2a2a;
-      border-radius: 12px 12px 12px 2px;
-      padding: 8px 12px;
-      font-size: 13px;
-      align-self: flex-start;
-      max-width: 80%;
-      color: #eee;
-      word-wrap: break-word;
     }
 
     #settings-view {
@@ -122,7 +27,7 @@
       flex-direction: column;
       padding: 16px;
       gap: 12px;
-      display: none;
+      display: flex;
       overflow-y: auto;
     }
     .settings-label {
@@ -143,7 +48,18 @@
       outline: none;
       font-family: monospace;
     }
-    .settings-input:focus { border-color: #6366f1; }
+    .settings-input:focus, .settings-select:focus { border-color: #6366f1; }
+    .settings-select {
+      width: 100%;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: white;
+      font-size: 12px;
+      outline: none;
+      appearance: auto;
+    }
     #save-btn {
       background: #6366f1;
       border: none;
@@ -169,40 +85,43 @@
       border-top: 1px solid #222;
       margin: 4px 0;
     }
+    .settings-hidden { display: none; }
   </style>
 </head>
 <body>
-  <div id="st-header">
-    <span>Staple</span>
-    <button id="gear-btn" title="Settings">&#9881;</button>
-  </div>
-
-  <div id="chat-view">
-    <div id="chat-container">
-      <div class="msg-buddy">Hey! Ask me where anything is on this page.</div>
-    </div>
-    <div id="input-row">
-      <input id="user-input" placeholder="Ask Staple..." />
-      <button id="send-btn">&rarr;</button>
-    </div>
-    <div id="walk-row">
-      <button id="walk-next-btn">Next &#8594;</button>
-    </div>
-  </div>
+  <div id="st-header">Staple</div>
 
   <div id="settings-view">
-    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-      <button id="back-btn">&larr; Back</button>
-      <span style="font-weight:600; font-size:14px;">API Keys</span>
-    </div>
     <hr class="settings-divider" />
 
     <div class="settings-section">
-      <div class="settings-label">DeepSeek API Key</div>
-      <input class="settings-input" id="input-deepseek" type="password" placeholder="sk-..." />
+      <div class="settings-label">Provider</div>
+      <select class="settings-select" id="select-provider">
+        <option value="deepseek">DeepSeek</option>
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="groq">Groq</option>
+        <option value="gemini">Google Gemini</option>
+        <option value="ollama">Ollama (local)</option>
+      </select>
     </div>
 
-    <button id="save-btn">Save Keys</button>
+    <div class="settings-section" id="section-model-select">
+      <div class="settings-label">Model</div>
+      <select class="settings-select" id="select-model"></select>
+    </div>
+
+    <div class="settings-section settings-hidden" id="section-model-custom">
+      <div class="settings-label">Model</div>
+      <input class="settings-input" id="input-model-custom" placeholder="llama3.1" />
+    </div>
+
+    <div class="settings-section" id="section-api-key">
+      <div class="settings-label">API Key</div>
+      <input class="settings-input" id="input-api-key" type="password" placeholder="sk-..." />
+    </div>
+
+    <button id="save-btn">Save</button>
     <div id="save-status"></div>
   </div>
 

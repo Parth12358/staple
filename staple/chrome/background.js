@@ -1,30 +1,70 @@
 const api = typeof browser !== 'undefined' ? browser : chrome;
-const LOG_PREFIX = '[Staple BG]';
 
-function getStorage() { return api.storage.local; }
+const PROVIDERS = {
+  deepseek: {
+    name: 'DeepSeek',
+    url: 'https://api.deepseek.com/chat/completions',
+    auth: 'bearer',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    format: 'openai'
+  },
+  openai: {
+    name: 'OpenAI',
+    url: 'https://api.openai.com/v1/chat/completions',
+    auth: 'bearer',
+    models: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
+    format: 'openai'
+  },
+  anthropic: {
+    name: 'Anthropic',
+    url: 'https://api.anthropic.com/v1/messages',
+    auth: 'x-api-key',
+    models: ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+    format: 'anthropic'
+  },
+  groq: {
+    name: 'Groq',
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    auth: 'bearer',
+    models: ['openai/gpt-oss-120b', 'qwen/qwen3.6-27b'],
+    format: 'openai'
+  },
+  gemini: {
+    name: 'Google Gemini',
+    url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+    auth: 'bearer',
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+    format: 'openai'
+  },
+  ollama: {
+    name: 'Ollama (local)',
+    url: 'http://localhost:11434/api/chat',
+    auth: 'none',
+    models: [],
+    format: 'ollama'
+  }
+};
+
 function getSyncStorage() { return api.storage.sync; }
 
-function loadHistory() {
+async function loadSettings() {
   return new Promise(resolve => {
-    getStorage().get(['conversationHistory'], data => {
-      resolve(data.conversationHistory || []);
+    getSyncStorage().get(['provider', 'model', 'apiKey', 'deepseekKey'], async data => {
+      if (!data.apiKey && data.deepseekKey) {
+        data.apiKey = data.deepseekKey;
+        data.provider = 'deepseek';
+        if (!data.model) data.model = 'deepseek-v4-flash';
+        getSyncStorage().set({ apiKey: data.apiKey, provider: data.provider, model: data.model });
+      }
+      if (!data.provider) data.provider = 'deepseek';
+      if (!data.model) data.model = 'deepseek-v4-flash';
+      console.log('[Staple][background:loadSettings] Loaded', { provider: data.provider, model: data.model, hasKey: (data.apiKey || '').length > 0 });
+      resolve({ provider: data.provider, model: data.model, apiKey: data.apiKey || '' });
     });
   });
 }
 
-function saveHistory(history) {
-  return new Promise(resolve => {
-    getStorage().set({ conversationHistory: history }, resolve);
-  });
-}
-
-function loadKeys() {
-  return new Promise(resolve => {
-    getSyncStorage().get(['deepseekKey'], resolve);
-  });
-}
-
-function buildInlineMessages(question, elementMap, history, url, title) {
+function buildMessages(question, elementMap, url, title) {
   const mapString = elementMap
     .map(e => `[${e.id}] ${e.label} (${e.tag}) at (${e.x}, ${e.y})`)
     .join('\n');
@@ -33,203 +73,165 @@ function buildInlineMessages(question, elementMap, history, url, title) {
     ? `Site context:\n  URL: ${url || 'unknown'}\n  Title: ${title || 'unknown'}\n`
     : '';
 
-  const systemPrompt = `You are Staple, an AI navigation assistant embedded in a browser extension.
-You help users navigate UI on any webpage by reading a map of interactive elements.
-When a task requires multiple actions, return all steps in sequence.
-Always respond in valid JSON only, no markdown:
+  const systemPrompt = `You are Staple, a navigation assistant embedded in a browser extension. The user will ask where something is or how to do something on the current page. You will be given a map of all interactive elements on the page.
+
+Identify the single most relevant element and write a clear, specific instruction that tells the user exactly what to do and where to find it. Mention the element label and its location on the page where helpful. Write in imperative voice: Click, Type, Select, Toggle. Do not use emojis. Do not use bullet points. Write in plain sentences. Do not say you should or you can.
+
+If the element is not found, set elementId to null and explain what is not available and suggest the most likely alternative in plain text.
+
+Respond in valid JSON only, no markdown, no explanation outside the JSON:
 {
-  "steps": [
-    { "elementId": <number or null>, "instruction": "<clear friendly instruction>" },
-    { "elementId": <number or null>, "instruction": "<next step>" }
-  ],
-  "summary": "<one line summary of what you are helping with>"
-}
-If only one step is needed, still return a steps array with one item.`;
+  "elementId": <number or null>,
+  "instruction": "<imperative sentence describing exactly what to do and where>",
+  "context": "<optional: what happens next, a warning, or an alternative — empty string if not needed>"
+}`;
 
-  return [
-    { role: 'system', content: systemPrompt + '\n' + siteContext },
-    ...history,
-    { role: 'user', content: `Page elements:\n${mapString}\n\nUser question: ${question}` }
-  ];
+  return { systemPrompt, userMessage: `Page elements:\n${mapString}\n\nUser question: ${question}`, siteContext };
 }
 
-async function handleInlineQuery(question, elementMap, url, title) {
-  try {
-    const keys = await loadKeys();
-    if (!keys.deepseekKey) {
-      return { success: false, error: 'No DeepSeek API key configured.' };
-    }
+function buildRequest(provider, model, providerConfig, apiKey, messages) {
+  const { systemPrompt, userMessage } = messages;
+  const format = providerConfig.format;
 
-    const history = await loadHistory();
-    const messages = buildInlineMessages(question, elementMap, history, url, title);
-    const result = await handleDeepSeekQuery(messages, keys.deepseekKey);
-
-    if (!result.success) return result;
-
-    const assistantText = result.result.summary || (result.result.steps && result.result.steps.map(s => s.instruction).join('. ')) || 'Done.';
-    const updatedHistory = [
-      ...history,
-      { role: 'user', content: question },
-      { role: 'assistant', content: assistantText }
-    ];
-    await saveHistory(updatedHistory);
-
-    return result;
-  } catch (err) {
-    console.error(`${LOG_PREFIX} Inline query failed:`, err);
-    return { success: false, error: err.message || 'Something went wrong.' };
+  if (format === 'anthropic') {
+    return {
+      url: providerConfig.url,
+      options: {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 800,
+          system: systemPrompt + '\n' + messages.siteContext,
+          messages: [{ role: 'user', content: userMessage }]
+        })
+      },
+      format: 'anthropic'
+    };
   }
-}
 
-let midFlowProcessing = false;
-
-async function handlePageChangedMidFlow(elementMap, url, activeSteps, activeStepIndex) {
-  try {
-    if (midFlowProcessing) {
-      console.log(`${LOG_PREFIX} midFlowProcessing guard active, skipping duplicate PAGE_CHANGED_MID_FLOW`);
-      return { success: false, error: 'Already processing a mid-flow re-evaluation.' };
-    }
-    midFlowProcessing = true;
-
-    const keys = await loadKeys();
-    if (!keys.deepseekKey) {
-      return { success: false, error: 'No DeepSeek API key configured.' };
-    }
-
-    const history = await loadHistory();
-
-    const mapString = elementMap
-      .map(e => `[${e.id}] ${e.label} (${e.tag}) at (${e.x}, ${e.y})`)
-      .join('\n');
-
-    const remainingSteps = activeSteps.slice(activeStepIndex);
-    const stepsSummary = remainingSteps
-      .map((s, i) => `  Step ${activeStepIndex + i + 1}: ${s.instruction}`)
-      .join('\n');
-
-    const systemPrompt = `You are Staple, an AI navigation assistant embedded in a browser extension.
-You help users navigate UI on any webpage by reading a map of interactive elements.
-When a task requires multiple actions, return all steps in sequence.
-Always respond in valid JSON only, no markdown:
-{
-  "steps": [
-    { "elementId": <number or null>, "instruction": "<clear friendly instruction>" },
-    { "elementId": <number or null>, "instruction": "<next step>" }
-  ],
-  "summary": "<one line summary of what you are helping with>"
-}
-
-The user was mid-flow on a multi-step task and the page has changed or refreshed.
-Here is the original task steps and where we were.
-Here is the fresh element map of the current page.
-Re-evaluate the remaining steps and return an updated steps array starting from the current position that maps correctly to the elements now visible on this page.
-If the task is already complete based on the current page state, return an empty steps array and set summary to the completion message.`;
-
-    const userContent = `Current page URL: ${url}\n\nFresh element map:\n${mapString}\n\nOriginal task remaining (at step ${activeStepIndex + 1} of ${activeSteps.length}):\n${stepsSummary}\n\nRe-evaluate and return updated steps for this page.`;
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...history,
-      { role: 'user', content: userContent }
-    ];
-
-    const result = await handleDeepSeekQuery(messages, keys.deepseekKey);
-
-    if (!result.success) return result;
-
-    const updatedSteps = result.result.steps || [];
-
-    await getStorage().set({
-      activeSteps: updatedSteps,
-      activeStepIndex: 0,
-      elementMap
-    });
-
-    const midFlowAssistantText = result.result.summary || (result.result.steps && result.result.steps.map(s => s.instruction).join('. ')) || 'Page re-evaluated.';
-    const updatedHistory = [
-      ...history,
-      { role: 'assistant', content: midFlowAssistantText }
-    ];
-    await saveHistory(updatedHistory);
-
-    api.runtime.sendMessage({
-      type: 'PAGE_CHANGED_MID_FLOW',
-      elementMap,
-      url,
-      activeSteps: updatedSteps,
-      activeStepIndex: 0,
-      summary: result.result.summary
-    });
-
-    midFlowProcessing = false;
-    return result;
-  } catch (err) {
-    midFlowProcessing = false;
-    console.error(`${LOG_PREFIX} Page changed re-evaluation failed:`, err);
-    return { success: false, error: err.message || 'Re-evaluation failed.' };
+  if (format === 'ollama') {
+    return {
+      url: providerConfig.url,
+      options: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt + '\n' + messages.siteContext },
+            { role: 'user', content: userMessage }
+          ],
+          stream: false
+        })
+      },
+      format: 'ollama'
+    };
   }
-}
 
-api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'DEEPSEEK_QUERY') {
-    handleDeepSeekQuery(msg.messages, msg.deepseekKey).then(sendResponse);
-    return true;
-  }
-  if (msg.type === 'INLINE_QUERY') {
-    handleInlineQuery(msg.question, msg.elementMap, msg.url, msg.title).then(sendResponse);
-    return true;
-  }
-  if (msg.type === 'PAGE_CHANGED_MID_FLOW') {
-    handlePageChangedMidFlow(msg.elementMap, msg.url, msg.activeSteps, msg.activeStepIndex).then(sendResponse);
-    return true;
-  }
-});
-
-async function handleDeepSeekQuery(messages, deepseekKey) {
-  try {
-    if (!deepseekKey) {
-      return { success: false, error: 'No DeepSeek API key configured.' };
-    }
-
-    const response = await fetch('https://api.deepseek.com/chat/completions', {
+  return {
+    url: providerConfig.url,
+    options: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${deepseekKey}`
+        'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages,
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt + '\n' + messages.siteContext },
+          { role: 'user', content: userMessage }
+        ],
         response_format: { type: 'json_object' },
         max_tokens: 800
       })
-    });
+    },
+    format: 'openai'
+  };
+}
+
+function parseResponse(format, data) {
+  if (format === 'anthropic') return data.content[0].text;
+  if (format === 'ollama') return data.message.content;
+  return data.choices[0].message.content;
+}
+
+async function handleQuery(question, elementMap, url, title) {
+  try {
+    const settings = await loadSettings();
+    if (!settings.apiKey && settings.provider !== 'ollama') {
+      console.error('[Staple][background:queryLLM] No API key set for provider', { provider: settings.provider });
+      return { success: false, error: 'No API key configured. Open the extension settings.' };
+    }
+
+    const providerConfig = PROVIDERS[settings.provider];
+    if (!providerConfig) {
+      console.error('[Staple][background:queryLLM] Unknown provider', { provider: settings.provider });
+      return { success: false, error: 'Unknown provider. Check settings.' };
+    }
+
+    const model = settings.provider === 'ollama' ? settings.model.trim() : settings.model;
+
+    if (!elementMap || !elementMap.length) {
+      console.warn('[Staple][background:queryLLM] Empty elementMap sent to LLM', { url });
+    }
+
+    const messages = buildMessages(question, elementMap, url, title);
+    const request = buildRequest(settings.provider, model, providerConfig, settings.apiKey, messages);
+
+    console.log('[Staple][background:queryLLM] Calling API', { provider: settings.provider, model, url: request.url, elementMapSize: elementMap.length });
+
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), 30000));
+    const response = await Promise.race([fetch(request.url, request.options), timeout]);
+
+    console.log('[Staple][background:queryLLM] API response status', { status: response.status });
 
     if (!response.ok) {
       const errText = await response.text().catch(() => 'Unknown error');
-      console.error(`${LOG_PREFIX} DeepSeek ${response.status}: ${errText}`);
-      return { success: false, error: `DeepSeek error (${response.status}). Check your API key.` };
+      console.error('[Staple][background:queryLLM] API request failed', { provider: settings.provider, model: settings.model, status: response.status, statusText: errText });
+      return { success: false, error: `${providerConfig.name} error (${response.status}). Check your API key and model.` };
     }
 
     const data = await response.json();
-    const raw = data.choices?.[0]?.message?.content;
+    const raw = parseResponse(request.format, data);
 
     if (!raw) {
-      return { success: false, error: 'Empty response from DeepSeek.' };
+      console.error('[Staple][background:queryLLM] LLM response missing expected content field', { format: request.format, provider: settings.provider, model: settings.model });
+      return { success: false, error: 'Empty response.' };
     }
 
     let result;
     try {
-      result = JSON.parse(raw);
+      const cleaned = raw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+      result = JSON.parse(cleaned);
     } catch {
-      console.error(`${LOG_PREFIX} Invalid JSON from DeepSeek:`, raw);
-      return { success: false, error: 'DeepSeek returned an unparseable response. Try again.' };
+      console.error('[Staple][background:queryLLM] Failed to parse LLM response as JSON', { raw: raw.slice(0, 200), provider: settings.provider, model: settings.model });
+      return { success: false, error: 'Model returned an unparseable response. Try again.' };
     }
+
+    console.log('[Staple][background:queryLLM] Calling sendResponse', { elementId: result.elementId, instruction: result.instruction?.slice(0, 50) });
 
     return { success: true, result };
   } catch (err) {
-    console.error(`${LOG_PREFIX} DeepSeek fetch failed:`, err);
-    return { success: false, error: `DeepSeek unavailable (${err.message || 'network error'}).` };
+    console.error('[Staple][background:queryLLM] Fetch exception', { error: err.message || err });
+    return { success: false, error: `Unavailable (${err.message || 'network error'}).` };
   }
 }
 
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  console.log('[Staple][background:onMessage] Message received', { type: msg.type });
+  if (msg.type === 'QUERY') {
+    handleQuery(msg.question, msg.elementMap, msg.url, msg.title)
+      .then(result => sendResponse(result))
+      .catch(err => {
+        console.error('[Staple][background:onMessage] handleQuery rejected', { error: err.message || err });
+        sendResponse({ success: false, error: err.message || 'Internal error' });
+      });
+    return true;
+  }
+});
