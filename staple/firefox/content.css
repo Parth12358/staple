@@ -2,14 +2,16 @@
   position: fixed;
   width: 80px;
   height: 80px;
-  bottom: 80px;
+  bottom: 100px;
   right: 20px;
   z-index: 2147483647;
   pointer-events: auto;
-  cursor: pointer;
-  will-change: left, top;
+  cursor: grab;
+  will-change: left, top, transform;
   transition: left 0.6s cubic-bezier(0.34, 1.56, 0.64, 1),
               top 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: scale(1.5);
+  transform-origin: center center;
 }
 
 #st-cat {
@@ -168,12 +170,18 @@
   flex-shrink: 0;
 }
 
+#st-buddy.is-dragging {
+  cursor: grabbing;
+  transition: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #st-cat[class*="state-"] {
     animation: none !important;
   }
   #st-buddy {
     transition: none !important;
+    transform: scale(1.5) !important;
     will-change: auto;
   }
 }

@@ -235,3 +235,13 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
+
+api.commands.onCommand.addListener((command) => {
+  if (command === 'toggle-staple') {
+    api.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        api.tabs.sendMessage(tabs[0].id, { type: 'TOGGLE_INPUT' });
+      }
+    });
+  }
+});

@@ -3,7 +3,7 @@
   "name": "Staple",
   "version": "1.0",
   "description": "AI that walks you through any UI",
-  "icons": { "128": "cat_icon.png" },
+  "icons": { "16": "icon_16.png", "48": "icon_48.png", "128": "icon_128.png" },
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "content_scripts": [{
@@ -13,9 +13,18 @@
     "run_at": "document_idle"
   }],
   "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_icon": "cat_icon.png" },
+  "action": { "default_popup": "popup.html", "default_icon": { "16": "icon_16.png", "48": "icon_48.png", "128": "icon_128.png" } },
   "web_accessible_resources": [{
     "resources": ["cat_sprite.png", "cat_icon.png"],
     "matches": ["<all_urls>"]
-  }]
+  }],
+  "commands": {
+    "toggle-staple": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+F",
+        "mac": "Command+Shift+F"
+      },
+      "description": "Open Staple search"
+    }
+  }
 }

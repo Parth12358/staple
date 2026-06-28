@@ -78,7 +78,15 @@ function injectCharacter() {
   buddy.appendChild(cat);
 
   buddy.addEventListener('click', handleBuddyClick);
+  buddy.addEventListener('mousedown', onBuddyMouseDown);
+  buddy.addEventListener('touchstart', onBuddyTouchStart, { passive: false });
+
   document.body.appendChild(buddy);
+
+  window.addEventListener('mousemove', onWindowMouseMove);
+  window.addEventListener('mouseup', onWindowMouseUp);
+  window.addEventListener('touchmove', onWindowTouchMove, { passive: false });
+  window.addEventListener('touchend', onWindowTouchEnd);
 
   const bubble = document.createElement('div');
   bubble.id = 'st-bubble';
@@ -124,6 +132,7 @@ function scheduleCleanAnimation() {
 }
 
 let walkTransitionEndHandler = null;
+let scrollCancelled = false;
 
 function moveCharacter(vx, vy) {
   console.log('[Staple][content:moveCharacter] Called', { x: vx, y: vy, scrollX: window.scrollX, scrollY: window.scrollY });
@@ -329,15 +338,134 @@ async function walkHome() {
   });
 }
 
-async function handleBuddyClick(e) {
-  e.stopPropagation();
-  console.log('[Staple][content:handleBuddyClick] Cat clicked');
+let isDragging = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragStartLeft = 0;
+let dragStartTop = 0;
+let hasDragged = false;
+let catFixedLeft = null;
+let catFixedTop = null;
+
+function toggleInlineInput() {
   const box = document.getElementById('st-inline-box');
   if (box && box.style.display !== 'none') {
     hideInlineBox();
+    const input = document.getElementById('st-inline-input');
+    if (input) input.value = '';
     return;
   }
   showInlineBox();
+}
+
+function onBuddyMouseDown(e) {
+  if (e.button !== 0) return;
+  isDragging = true;
+  hasDragged = false;
+  dragStartX = e.clientX;
+  dragStartY = e.clientY;
+  const rect = document.getElementById('st-buddy').getBoundingClientRect();
+  dragStartLeft = rect.left;
+  dragStartTop = rect.top;
+  document.getElementById('st-buddy').classList.add('is-dragging');
+  e.preventDefault();
+}
+
+function onBuddyTouchStart(e) {
+  const touch = e.touches[0];
+  isDragging = true;
+  hasDragged = false;
+  dragStartX = touch.clientX;
+  dragStartY = touch.clientY;
+  const rect = document.getElementById('st-buddy').getBoundingClientRect();
+  dragStartLeft = rect.left;
+  dragStartTop = rect.top;
+  document.getElementById('st-buddy').classList.add('is-dragging');
+}
+
+function onWindowMouseMove(e) {
+  if (!isDragging) return;
+  doDragMove(e.clientX, e.clientY);
+}
+
+function onWindowTouchMove(e) {
+  if (!isDragging) return;
+  const touch = e.touches[0];
+  doDragMove(touch.clientX, touch.clientY);
+}
+
+function doDragMove(clientX, clientY) {
+  const dx = clientX - dragStartX;
+  const dy = clientY - dragStartY;
+
+  if (!hasDragged && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+  hasDragged = true;
+
+  const catSize = 44;
+  const newLeft = Math.max(0, Math.min(dragStartLeft + dx, window.innerWidth - catSize));
+  const newTop = Math.max(0, Math.min(dragStartTop + dy, window.innerHeight - catSize));
+
+  const buddy = document.getElementById('st-buddy');
+  buddy.style.transition = 'none';
+  buddy.style.left = `${newLeft}px`;
+  buddy.style.top = `${newTop}px`;
+  buddy.style.bottom = 'auto';
+  buddy.style.right = 'auto';
+
+  catFixedLeft = newLeft;
+  catFixedTop = newTop;
+}
+
+function onWindowMouseUp() {
+  finishDrag();
+}
+
+function onWindowTouchEnd() {
+  finishDrag();
+}
+
+function finishDrag() {
+  if (!isDragging) return;
+  isDragging = false;
+  document.getElementById('st-buddy').classList.remove('is-dragging');
+
+  if (hasDragged) {
+    snapCatToEdge();
+  } else {
+    toggleInlineInput();
+  }
+}
+
+function snapCatToEdge() {
+  const buddy = document.getElementById('st-buddy');
+  const catSize = 44;
+  const margin = 16;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  const currentLeft = parseFloat(buddy.style.left) || 0;
+  const currentTop = parseFloat(buddy.style.top) || 0;
+
+  const snapLeft = currentLeft < vw / 2
+    ? margin
+    : vw - catSize - margin;
+
+  const snapTop = Math.max(margin, Math.min(currentTop, vh - catSize - margin));
+
+  buddy.style.transition = 'left 0.25s ease, top 0.25s ease';
+  buddy.style.left = `${snapLeft}px`;
+  buddy.style.top = `${snapTop}px`;
+  buddy.style.bottom = 'auto';
+  buddy.style.right = 'auto';
+
+  catFixedLeft = snapLeft;
+  catFixedTop = snapTop;
+}
+
+async function handleBuddyClick(e) {
+  e.stopPropagation();
+  console.log('[Staple][content:handleBuddyClick] Cat clicked');
+  toggleInlineInput();
 }
 
 function showInlineBox() {
@@ -453,6 +581,16 @@ async function handleInlineSubmit() {
   const currentMap = scrapeElements();
   elementMap = currentMap;
 
+  if (!currentMap || !currentMap.length) {
+    elementMap = scrapeElements();
+  }
+  if (!elementMap.length) {
+    console.warn('[Staple][content:handleInlineSubmit] elementMap is empty, cannot send query', { url: window.location.href });
+    showBubble('Could not read this page. Try refreshing.');
+    setCharacterState('idle');
+    return;
+  }
+
   const serializableMap = currentMap.map(({ el, ...rest }) => rest);
 
   console.log('[Staple][content:handleInlineSubmit] Sending QUERY to background', { question, elementMapSize: serializableMap.length });
@@ -484,6 +622,13 @@ async function handleInlineSubmit() {
 
   const result = response.result;
 
+  if (!result || !result.instruction) {
+    console.error('[Staple][content:handleInlineSubmit] Invalid result from background', { result: result || null });
+    showBubble('Something went wrong. Try again.');
+    setCharacterState('idle');
+    return;
+  }
+
   console.log('[Staple][content:handleInlineSubmit] Acting on result', { elementId: result.elementId, instruction: result.instruction?.slice(0, 50) });
 
   if (result.elementId !== null && result.elementId !== undefined) {
@@ -494,9 +639,13 @@ async function handleInlineSubmit() {
 
       target.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       const container = getScrollContainer(target.el);
+      scrollCancelled = false;
       await waitForScrollEnd(container);
 
+      if (scrollCancelled) return;
+
       requestAnimationFrame(() => {
+        if (scrollCancelled) return;
         const rect = target.el.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
@@ -580,16 +729,24 @@ function resetCharacter() {
     activeScrollCleanup();
     activeScrollCleanup = null;
   }
+  scrollCancelled = true;
 
   if (walkTransitionEndHandler) {
     buddy.removeEventListener('transitionend', walkTransitionEndHandler);
     walkTransitionEndHandler = null;
   }
   buddy.style.transition = 'none';
-  buddy.style.left = '';
-  buddy.style.top = '';
-  buddy.style.bottom = '80px';
-  buddy.style.right = '20px';
+  if (catFixedLeft !== null && catFixedTop !== null) {
+    buddy.style.left = `${catFixedLeft}px`;
+    buddy.style.top = `${catFixedTop}px`;
+    buddy.style.bottom = 'auto';
+    buddy.style.right = 'auto';
+  } else {
+    buddy.style.left = '';
+    buddy.style.top = '';
+    buddy.style.bottom = '80px';
+    buddy.style.right = '20px';
+  }
 
   if (cat) cat.style.transform = 'scaleX(1)';
 
@@ -619,6 +776,9 @@ runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SET_STATE') {
     setCharacterState(msg.state);
   }
+  if (msg.type === 'TOGGLE_INPUT') {
+    toggleInlineInput();
+  }
   return true;
 });
 
@@ -633,6 +793,13 @@ function init() {
 }
 
 init();
+
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.shiftKey && e.key === 'F') {
+    e.preventDefault();
+    toggleInlineInput();
+  }
+});
 
 window.addEventListener('resize', () => {
   const buddy = document.getElementById('st-buddy');
