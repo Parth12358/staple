@@ -20,7 +20,6 @@ cd staple
 - **DOM scraping** — scans all interactive elements (buttons, links, inputs, etc.) on the current page
 - **DeepSeek** — natural language query maps user intent to a specific element
 - **Animated character** — moves to and highlights the target element on the page
-- **Langfuse** — logs every query for observability
 - **Cross-browser** — single codebase, Chrome MV3 + Firefox MV2
 
 ## Project Structure
