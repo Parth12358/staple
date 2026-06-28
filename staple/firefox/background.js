@@ -20,7 +20,7 @@ function saveHistory(history) {
 
 function loadKeys() {
   return new Promise(resolve => {
-    getSyncStorage().get(['deepseekKey', 'langfusePublicKey', 'langfuseSecretKey'], resolve);
+    getSyncStorage().get(['deepseekKey'], resolve);
   });
 }
 
@@ -73,9 +73,6 @@ async function handleInlineQuery(question, elementMap, url, title) {
       { role: 'assistant', content: assistantText }
     ];
     await saveHistory(updatedHistory);
-
-    const traceId = crypto.randomUUID();
-    handleLangfuseLog(traceId, messages, result.result, keys.langfusePublicKey, keys.langfuseSecretKey);
 
     return result;
   } catch (err) {
@@ -155,9 +152,6 @@ If the task is already complete based on the current page state, return an empty
     ];
     await saveHistory(updatedHistory);
 
-    const traceId = crypto.randomUUID();
-    handleLangfuseLog(traceId, messages, result.result, keys.langfusePublicKey, keys.langfuseSecretKey);
-
     api.runtime.sendMessage({
       type: 'PAGE_CHANGED_MID_FLOW',
       elementMap,
@@ -188,10 +182,6 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'PAGE_CHANGED_MID_FLOW') {
     handlePageChangedMidFlow(msg.elementMap, msg.url, msg.activeSteps, msg.activeStepIndex).then(sendResponse);
     return true;
-  }
-  if (msg.type === 'LANGFUSE_LOG') {
-    handleLangfuseLog(msg.traceId, msg.input, msg.output, msg.langfusePublicKey, msg.langfuseSecretKey);
-    return false;
   }
 });
 
@@ -243,30 +233,3 @@ async function handleDeepSeekQuery(messages, deepseekKey) {
   }
 }
 
-async function handleLangfuseLog(traceId, input, output, langfusePublicKey, langfuseSecretKey) {
-  if (!langfusePublicKey || !langfuseSecretKey) return;
-  try {
-    await fetch('https://cloud.langfuse.com/api/public/ingestion', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Basic ' + btoa(`${langfusePublicKey}:${langfuseSecretKey}`)
-      },
-      body: JSON.stringify({
-        batch: [{
-          type: 'generation',
-          body: {
-            traceId,
-            name: 'staple-query',
-            model: 'deepseek-chat',
-            input,
-            output,
-            startTime: new Date().toISOString()
-          }
-        }]
-      })
-    });
-  } catch (e) {
-    console.warn(`${LOG_PREFIX} Langfuse log failed silently`, e);
-  }
-}

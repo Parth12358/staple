@@ -4,15 +4,15 @@ const safeSession = api.storage.session || api.storage.local;
 async function getKeys() {
   return new Promise(resolve => {
     api.storage.sync.get(
-      ['deepseekKey', 'langfusePublicKey', 'langfuseSecretKey'],
+      ['deepseekKey'],
       resolve
     );
   });
 }
 
-async function saveKeys(deepseekKey, langfusePublicKey, langfuseSecretKey) {
+async function saveKeys(deepseekKey) {
   return new Promise(resolve => {
-    api.storage.sync.set({ deepseekKey, langfusePublicKey, langfuseSecretKey }, resolve);
+    api.storage.sync.set({ deepseekKey }, resolve);
   });
 }
 
@@ -34,10 +34,8 @@ function showSettings() {
   document.getElementById('chat-view').style.display = 'none';
   document.getElementById('settings-view').style.display = 'flex';
 
-  api.storage.sync.get(['deepseekKey', 'langfusePublicKey', 'langfuseSecretKey'], data => {
+  api.storage.sync.get(['deepseekKey'], data => {
     if (data.deepseekKey) document.getElementById('input-deepseek').value = data.deepseekKey;
-    if (data.langfusePublicKey) document.getElementById('input-lf-public').value = data.langfusePublicKey;
-    if (data.langfuseSecretKey) document.getElementById('input-lf-secret').value = data.langfuseSecretKey;
   });
 }
 
@@ -49,28 +47,14 @@ function showChat() {
 
 async function handleSaveKeys() {
   const deepseekKey = document.getElementById('input-deepseek').value.trim();
-  const langfusePublicKey = document.getElementById('input-lf-public').value.trim();
-  const langfuseSecretKey = document.getElementById('input-lf-secret').value.trim();
 
-  await saveKeys(deepseekKey, langfusePublicKey, langfuseSecretKey);
+  await saveKeys(deepseekKey);
 
   document.getElementById('save-status').innerText = 'Saved';
   setTimeout(() => {
     document.getElementById('save-status').innerText = '';
     showChat();
   }, 1000);
-}
-
-async function logToLangfuse(traceId, input, output, keys) {
-  if (!keys.langfusePublicKey || !keys.langfuseSecretKey) return;
-  api.runtime.sendMessage({
-    type: 'LANGFUSE_LOG',
-    traceId,
-    input,
-    output,
-    langfusePublicKey: keys.langfusePublicKey,
-    langfuseSecretKey: keys.langfuseSecretKey
-  });
 }
 
 function buildMessages(question, elementMap, url, title) {
@@ -340,9 +324,6 @@ async function handleSend() {
 
     const result = await queryDeepSeek(question, elementMap, keys, currentPageUrl, currentPageTitle);
     console.log('[Staple Step] handleSend - DeepSeek result:', JSON.stringify(result).slice(0, 200));
-    const traceId = crypto.randomUUID();
-    const messages = buildMessages(question, elementMap, currentPageUrl, currentPageTitle);
-    logToLangfuse(traceId, messages, result, keys);
 
     if (!result.steps && result.elementId !== undefined) {
       result.steps = [{ elementId: result.elementId, instruction: result.instruction || 'Here it is.' }];
